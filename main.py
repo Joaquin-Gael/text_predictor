@@ -1,19 +1,22 @@
 import torch as th
-from pygments.lexer import words
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 
 import numpy as np
-
-from sklearn.decomposition import PCA
 
 import pandas as pd
 
 import plotly.express as px
 
-from rich.progress import track
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn
+)
 
 from pathlib import Path
 
@@ -113,7 +116,11 @@ class WordRRN(nn.Module):
         return out
 
 dataset = WikiDataset()
-dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+train_dataset, test_dataset = random_split(dataset, [int(0.8*len(dataset)), len(dataset) - int(0.8*len(dataset))])
+
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
 vocab_size = max(dataset.words)+1
 emb_size = 128
@@ -121,40 +128,100 @@ output_size = vocab_size
 hidden_size = 256
 num_steps = 3
 
-num_epochs = 1
+num_epochs = 5
 
 model = WordRRN(vocab_size, emb_size, hidden_size, output_size, num_steps, pad_token=0)
 criterion = nn.CrossEntropyLoss()
 optimizer = th.optim.Adam(model.parameters(), lr=0.001)
 
 if __name__ == "__main__":
-    print(f"Max Indexing: {max(dataset.words)}")
-
-    for param, value in model.state_dict().items():
-        print(param, value.shape)
-
     for epoch in range(num_epochs):
         model.train()
-        total_loss = 0
-        for idx, batch in track(enumerate(dataloader), description="Batch...", total=len(dataloader)):
-            out = "XD"
+        total_loss = []
 
-            input_words = batch[0]
-            target = batch[1]
+        with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                TextColumn("[green]{task.fields[info]}"),
+                TextColumn("[red]Loss: {task.fields[loss]}"),
+                TextColumn("[red]Loss mean: {task.fields[loss_mean]}"),
+                TimeRemainingColumn()
+        ) as progress:
+            task = progress.add_task(
+                description=f"Epoch {epoch} - Train",
+                total=len(train_dataloader),
+                info="Iniciando",
+                loss="None",
+                loss_mean="None",
+            )
 
-            optimizer.zero_grad()
-            try:
-                out = model(input_words)
-            except Exception as e:
-                print(input_words)
-                print(e)
-                continue
-            #print("target shape: ", target.shape, "\n", "out shape: ", out.shape)
-            loss = criterion(out, target.squeeze())
+            for idx, batch in enumerate(train_dataloader):
+                progress.update(task, info=f"Lote {idx}")
 
-            total_loss += loss.item()
+                input_words = batch[0]
+                target = batch[1]
+                try:
+                    out = model(input_words)
+                except Exception as e:
+                    print("Error:", e)
+                    print("Word:", input_words)
+                    continue
 
+                loss = criterion(out, target.squeeze(dim=1))
+                progress.update(task, loss=f"{loss.item():.4f}")
+                total_loss.append(loss.item())
+                progress.update(task, loss_mean=f"{sum(total_loss)/len(total_loss)}")
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                progress.update(task ,completed=float(idx))
+
+        model.eval()
+
+        with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold red]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                TextColumn("[green]{task.fields[info]}"),
+                TextColumn("[blue]Loss: {task.fields[loss]}"),
+                TextColumn("[blue]Loss mean: {task.fields[loss_mean]}"),
+                TimeRemainingColumn()
+        ) as progress:
+            task = progress.add_task(
+                description=f"Epoch {epoch} - Test",
+                total=len(test_dataloader),
+                info="Iniciando",
+                loss="None",
+                loss_mean="None",
+            )
+
+            for idx, batch in enumerate(test_dataloader):
+                progress.update(task, info=f"Lote {idx}")
+
+                input_words = batch[0]
+                target = batch[1]
+
+                try:
+                    out = model(input_words)
+                except Exception as e:
+                    print("Error:", e)
+                    print("Word:", input_words)
+                    continue
+
+            loss = criterion(out, target.squeeze(dim=1))
+            progress.update(task, loss=f"{loss.item():.4f}")
+            total_loss.append(loss.item())
+            progress.update(task, loss_mean=f"{sum(total_loss)/len(total_loss)}")
             loss.backward()
             optimizer.step()
+            optimizer.zero_grad()
+            progress.update(task ,completed=float(idx))
 
-        print(f'Epoch {epoch}, Loss: {total_loss / len(dataloader)}')
+        print(f"Epoch {epoch}, Error: {sum(total_loss)/len(total_loss)}")
