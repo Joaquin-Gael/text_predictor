@@ -7,7 +7,13 @@ from bs4 import BeautifulSoup
 
 import polars as pl
 
-from rich.progress import track
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TimeElapsedColumn
+)
 
 enc = tiktoken.encoding_for_model("gpt-4o")
 
@@ -26,22 +32,36 @@ def get_data() -> pl.DataFrame | None:
             "word":[],
             "prediction":[],
         }
-        for line in track(list_words, description="Processing...", total=len(list_words)):
-            couple = {
-                "word":[],
-                "prediction":[],
-            }
-            encoded = enc.encode(line)
-            for i, word in enumerate(encoded):
-                couple["word"].append(word)
-                if not i+1 >= len(encoded):
-                    couple["prediction"].append(encoded[i+1])
-                else:
-                    couple["prediction"].append(enc.encode(" ")[0])
+        with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                TextColumn("Paso: {task.fields[step]}"),
+                TimeElapsedColumn()
+        ) as progress:
 
-            couple_words["word"].extend(couple["word"])
-            couple_words["prediction"].extend(couple["prediction"])
+            task = progress.add_task("Procesando líneas...", total=len(list_words), step="Inicializando")
 
+            for line in list_words:
+                progress.update(task, step="Codificando línea")
+                encoded = enc.encode(line)
+                couple = {
+                    "word": [],
+                    "prediction": [],
+                }
+
+                for i, word in enumerate(encoded):
+                    progress.update(task, step=f"Procesando palabra {i+1} de {len(encoded)}")
+                    couple["word"].append(word)
+                    if i + 1 < len(encoded):
+                        couple["prediction"].append(encoded[i+1])
+                    else:
+                        couple["prediction"].append(enc.encode(" ")[0])
+
+                couple_words["word"].extend(couple["word"])
+                couple_words["prediction"].extend(couple["prediction"])
+
+                progress.advance(task)
 
         df = pl.DataFrame(couple_words)
 
