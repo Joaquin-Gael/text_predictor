@@ -2,12 +2,13 @@ import torch as th
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
 
 import pandas as pd
 
-import plotly.express as px
+import plotly.graph_objects as go
 
 from rich.progress import (
     Progress,
@@ -17,12 +18,17 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn
 )
+from rich import print
 
 from pathlib import Path
 
 import itertools
 
 from utils import get_data, decode_text, encode_text
+
+writer = SummaryWriter(
+    str(Path(__file__).parent.joinpath('logs').resolve()),
+)
 
 class WikiDataset(Dataset):
     def __init__(self):
@@ -56,9 +62,9 @@ class WikiDataset(Dataset):
         return decode_text(self.words)
 
 
-class WordRRN(nn.Module):
+class WordRNN(nn.Module):
     def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, pad_token=0):
-        super(WordRRN, self).__init__()
+        super(WordRNN, self).__init__()
 
         self.hidden_size = hidden_size # es la capa que se encarga de comunicar el contexto a las otras
         self.num_steps = num_steps # nose
@@ -115,6 +121,27 @@ class WordRRN(nn.Module):
 
         return out
 
+class WordRRN_LSTM(nn.Module):
+    def __init__(self, vocab_size, emb_size, hidden_size, output_size, pad_token=0):
+        super(WordRRN_LSTM, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, emb_size, padding_idx=pad_token)
+        self.rnn = nn.RNN(emb_size, hidden_size, num_layers=3, batch_first=True)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers=5, batch_first=True)
+        self.dropout = nn.Dropout(p=0.3)
+        self.fc = nn.Linear(hidden_size, output_size)
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, input_words):
+        emb = self.embedding(input_words)
+        rnn_out, _ = self.rnn(emb)
+        dropout = self.dropout(rnn_out)
+        lstm_out, _ = self.lstm(dropout)
+        h_pool = th.mean(lstm_out, dim=1)
+        x = self.fc(h_pool)
+        out = self.softmax(x)
+        return out
+
+
 dataset = WikiDataset()
 
 train_dataset, test_dataset = random_split(dataset, [int(0.8*len(dataset)), len(dataset) - int(0.8*len(dataset))])
@@ -128,16 +155,38 @@ output_size = vocab_size
 hidden_size = 256
 num_steps = 3
 
-num_epochs = 5
+num_epochs = 1
 
-model = WordRRN(vocab_size, emb_size, hidden_size, output_size, num_steps, pad_token=0)
+model = WordRRN_LSTM(vocab_size, emb_size, hidden_size, output_size, pad_token=0)
 criterion = nn.CrossEntropyLoss()
 optimizer = th.optim.Adam(model.parameters(), lr=0.001)
 
 if __name__ == "__main__":
+    print(f"Size Data Set: {dataset.shape()}")
+    print(f"Vocab Size: {vocab_size}")
+    print(f"Embedding Size: {emb_size}")
+    print(f"Output Size: {output_size}")
+    print(f"Input Size: {emb_size}")
+    print(f"Number of Epochs: {num_epochs}")
+    print(f"Word Size: {test_dataset[1][0].item()}")
+    print(f"Word Decode: {decode_text([test_dataset[1][0].item()])}")
+
+    with th.inference_mode():
+        sequence_input = "Argentina es"
+        encode = encode_text(sequence_input)
+        input_tensor = th.tensor([encode], dtype=th.long)
+
+        out = model(input_tensor)
+
+        predicted_indices = out.argmax(dim=1).tolist()
+        sequence_output = sequence_input + decode_text(predicted_indices)
+
+        print("Oración final:", sequence_output)
+
+
     for epoch in range(num_epochs):
         model.train()
-        total_loss = []
+        total_loss_train = []
 
         with Progress(
                 SpinnerColumn(),
@@ -173,14 +222,16 @@ if __name__ == "__main__":
 
                 loss = criterion(out, target.squeeze(dim=1))
                 progress.update(task, loss=f"{loss.item():.4f}")
-                total_loss.append(loss.item())
-                progress.update(task, loss_mean=f"{sum(total_loss)/len(total_loss)}")
+                writer.add_scalar("train loss", loss.item(), idx)
+                total_loss_train.append(loss.item())
+                progress.update(task, loss_mean=f"{sum(total_loss_train) / len(total_loss_train)}")
                 loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
                 progress.update(task ,completed=float(idx))
 
         model.eval()
+        total_loss_test = []
 
         with Progress(
                 SpinnerColumn(),
@@ -215,13 +266,86 @@ if __name__ == "__main__":
                     print("Word:", input_words)
                     continue
 
-            loss = criterion(out, target.squeeze(dim=1))
-            progress.update(task, loss=f"{loss.item():.4f}")
-            total_loss.append(loss.item())
-            progress.update(task, loss_mean=f"{sum(total_loss)/len(total_loss)}")
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            progress.update(task ,completed=float(idx))
+                loss = criterion(out, target.squeeze(dim=1))
+                progress.update(task, loss=f"{loss.item():.4f}")
+                writer.add_scalar("test loss", loss.item(), idx)
+                total_loss_test.append(loss.item())
+                progress.update(task, loss_mean=f"{sum(total_loss_test) / len(total_loss_test)}")
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                progress.update(task ,completed=float(idx))
 
-        print(f"Epoch {epoch}, Error: {sum(total_loss)/len(total_loss)}")
+        print(f"Epoch {epoch}, Error: {sum(total_loss_test) / len(total_loss_test)}")
+
+
+        writer.add_graph(
+            model,
+            th.tensor(
+                [encode_text("Argentina es")],
+                dtype=th.long
+            )
+        )
+
+        writer.close()
+
+        diff = len(total_loss_test) - len(total_loss_train)
+
+        if not len(total_loss_test) > len(total_loss_train):
+            diff = len(total_loss_train) - len(total_loss_test)
+
+        if diff > 0:
+            total_loss_test_extended = total_loss_test + [np.nan] * diff
+        else:
+            total_loss_test_extended = total_loss_test
+
+        df_loss = pd.DataFrame({
+            "Epoch":range(1, len(total_loss_train)+1),
+            "Loss Train": total_loss_train,
+            "Loss Test":total_loss_test_extended
+        })
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Scatter(
+                x=df_loss["Epoch"],
+                y=df_loss["Loss Train"],
+                mode='lines+markers',
+                name="Training Loss",
+                line=dict(color='blue')
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df_loss["Epoch"],
+                y=df_loss["Loss Test"],
+                mode="lines+markers",
+                name="Validation Loss",
+                line=dict(color='red')
+            )
+        )
+
+        fig.update_layout(
+            title="Pérdida de Entrenamiento y Validación",
+            xaxis_title="Época",
+            yaxis_title="Pérdida",
+            legend_title="Tipo de Pérdida",
+            template="plotly_dark"
+        )
+
+        fig.show()
+
+
+
+    with th.inference_mode():
+        sequence_input = "Argentina es"
+        encode = encode_text(sequence_input)
+        input_tensor = th.tensor([encode], dtype=th.long)
+
+        out = model(input_tensor)
+
+        predicted_indices = out.argmax(dim=1).tolist()
+        sequence_output = sequence_input + decode_text(predicted_indices)
+
+        print("Oración final:", sequence_output)
