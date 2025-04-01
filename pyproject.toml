@@ -19,6 +19,7 @@ rich = "^13.9.4"
 torchaudio = "^2.6.0"
 pandas = "^2.2.3"
 scikit-learn = "^1.6.1"
+tensorboard = "^2.19.0"
 
 
 [build-system]
