@@ -2,13 +2,13 @@
 <module type="EMPTY_MODULE" version="4">
   <component name="FacetManager">
     <facet type="Python" name="Python facet">
-      <configuration sdkName="Python 3.12 virtualenv at C:\Users\Joaqu\AppData\Local\pypoetry\Cache\virtualenvs\llm-th-juM7Zyy6-py3.12" />
+      <configuration sdkName="Python 3.13 virtualenv at C:\Users\Usuario\AppData\Local\pypoetry\Cache\virtualenvs\text-predictor-EmQfMmjs-py3.13" />
     </facet>
   </component>
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$" />
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
-    <orderEntry type="library" name="Python 3.12 virtualenv at C:\Users\Joaqu\AppData\Local\pypoetry\Cache\virtualenvs\llm-th-juM7Zyy6-py3.12 interpreter library" level="application" />
+    <orderEntry type="library" name="Python 3.13 virtualenv at C:\Users\Usuario\AppData\Local\pypoetry\Cache\virtualenvs\text-predictor-EmQfMmjs-py3.13 interpreter library" level="application" />
   </component>
 </module>
