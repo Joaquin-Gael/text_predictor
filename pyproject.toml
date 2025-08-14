@@ -1,15 +1,17 @@
 [tool.poetry]
-name = "llm-th"
+name = "text_predictor"
 version = "0.1.0"
 description = ""
 authors = ["git-Joaquin-Gael <guzmanantonio867@gmail.com>"]
 readme = "README.md"
+package-mode = false
+packages = [{include = "text_predictor"}]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.12,<3.14"
 tiktoken = "^0.9.0"
-torch = "^2.6.0"
-torchvision = "^0.21.0"
+torch = {version = "^2.8.0", source = "pytorch-cu129"}
+torchvision = "^0.23.0"
 plotly = "^6.0.0"
 requests = "^2.32.3"
 beautifulsoup4 = "^4.13.3"
@@ -20,7 +22,12 @@ torchaudio = "^2.6.0"
 pandas = "^2.2.3"
 scikit-learn = "^1.6.1"
 tensorboard = "^2.19.0"
+transformers = "^4.55.0"
 
+[[tool.poetry.source]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core"]
