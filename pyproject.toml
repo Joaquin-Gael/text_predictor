@@ -23,6 +23,8 @@ pandas = "^2.2.3"
 scikit-learn = "^1.6.1"
 tensorboard = "^2.19.0"
 transformers = "^4.55.0"
+reflex = "^0.8.6"
+tbparse = "^0.0.9"
 
 [[tool.poetry.source]]
 name = "pytorch-cu129"
