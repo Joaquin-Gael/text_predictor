@@ -1,5 +1,5 @@
 from typing import Optional
-from utils import console, gen_graphic
+
 import torch as th
 from torch import nn
 import torch.nn.functional as F
@@ -26,10 +26,13 @@ from transformers import LogitsProcessorList, RepetitionPenaltyLogitsProcessor, 
 
 import itertools
 
-from utils import get_data, decode_text, encode_text, only_spanish_letters
+from utils import get_data, decode_text, encode_text, only_spanish_letters, console, gen_graphic
 
 console.print(th.cuda.is_available(), style="bold green")
 console.print(th.cuda.get_device_name(0) if th.cuda.is_available() else "No CUDA available", style="bold green")
+console.print(f"allocated: {th.cuda.memory_allocated() / 1024**3:.2f} GiB")
+console.print(f"reserved: {th.cuda.memory_reserved() / 1024**3:.2f} GiB")
+console.print(th.cuda.memory_summary(device="cuda", abbreviated=True))
 
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 
@@ -152,7 +155,6 @@ class TransformerModel(nn.Module):
 
         #self.output_layer.weight = self.embedding.weight
 
-    
     def forward(self, input_words):
         emb = self.embedding(input_words)
         enc = self.positional_encoding(emb)
@@ -184,7 +186,151 @@ class GPT2Model(nn.Module):
         out = self.output_layer(out)
         return out
 
-dataset = WikiDataset()
+class NanoModel(nn.Module):
+    def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, head_num, mem_len=512):
+        super(NanoModel, self).__init__()
+        
+        self.mem_len = mem_len
+        self.hidden_size = hidden_size
+        self.emb_size = emb_size
+        
+        # Core components
+        self.embedding = nn.Embedding(vocab_size, emb_size)
+        self.pos_emb = PositionalEncoding(vocab_size, emb_size)
+        
+        # Relative positional encoding
+        self.u = nn.Parameter(th.Tensor(head_num, emb_size // head_num))
+        self.v = nn.Parameter(th.Tensor(head_num, emb_size // head_num))
+        nn.init.xavier_normal_(self.u)
+        nn.init.xavier_normal_(self.v)
+        
+        # Transformer-XL blocks
+        self.transformer_blocks = nn.ModuleList([
+            TransformerXLBlock(
+                emb_size,
+                head_num,
+                hidden_size,
+                dropout=0.1
+            ) for _ in range(num_steps)
+        ])
+        
+        self.output_layer = nn.Linear(emb_size, output_size, bias=False)
+        self.output_layer.weight = self.embedding.weight
+        
+        # Memory states
+        self.mems = []
+        
+    def _update_mems(self, hidden_states, mems):
+        # Update memory with current hidden states
+        if len(mems) == 0:
+            mems = [th.empty(0, dtype=hidden_states.dtype, device=device)] * len(self.transformer_blocks)
+        assert len(hidden_states) == len(mems)
+        
+        with th.no_grad():
+            new_mems = []
+            for i in range(len(hidden_states)):
+                cat = th.cat([mems[i], hidden_states[i]], dim=1)
+                new_mems.append(cat[:, -self.mem_len:].detach())
+        return new_mems
+
+    def forward(self, input_words, mems=None):
+        if mems is None:
+            mems = [th.empty(0, dtype=th.float, device=device)] * len(self.transformer_blocks)
+            
+        # Word embeddings + positional encoding
+        word_emb = self.embedding(input_words)
+        pos_emb = self.pos_emb(word_emb)
+        
+        # Create causal attention mask
+        seq_len = input_words.size(1)
+        attn_mask = th.triu(
+            th.ones((seq_len, seq_len), dtype=th.bool, device=device),
+            diagonal=1
+        )
+        
+        hidden_states = []
+        current_hidden = pos_emb
+        
+        # Process through transformer blocks with memory
+        for _, (transformer_block, m) in enumerate(zip(self.transformer_blocks, mems)):
+            # Extend attention mask for memory tokens
+            if m.numel() > 0:
+                mem_len = m.size(1)
+                mem_mask = th.zeros((seq_len, mem_len), dtype=th.bool, device=device)
+                attn_mask_extended = th.cat([mem_mask, attn_mask], dim=1)
+            else:
+                attn_mask_extended = attn_mask
+                
+            current_hidden = transformer_block(
+                current_hidden,
+                m,
+                self.u,
+                self.v,
+                attn_mask_extended
+            )
+            hidden_states.append(current_hidden)
+            
+        # Update memory states
+        new_mems = self._update_mems(hidden_states, mems)
+        
+        # Output projection
+        output = self.output_layer(current_hidden)
+        
+        return output, new_mems
+
+class TransformerXLBlock(nn.Module):
+    def __init__(self, emb_size, hidden_size, num_heads, dropout=0.1):
+        super().__init__()
+        
+        self.attention = nn.MultiheadAttention(emb_size, num_heads, dropout, batch_first=True)
+        
+        self.norm = nn.LayerNorm(emb_size)
+
+        self.norm1 = nn.LayerNorm(emb_size)
+        self.norm2 = nn.LayerNorm(emb_size)
+        
+        self.ff = nn.Sequential(
+            nn.Linear(emb_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size * 2),
+            nn.GELU(),
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, emb_size),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, x, mem, u, v, mask=None, max_mem_len=512):
+        norm = self.norm(x)
+        
+        B, L, E = norm.shape
+
+        
+        if th.isnan(norm).any().item():
+            print("NaN values in norm")
+
+
+        if mem.numel() > 0:
+            ctx = th.cat([mem, norm], dim=1)[:, -max_mem_len:, :]
+            
+        else:
+            ctx = norm
+
+
+        attended, _ = self.attention(
+            norm,
+            ctx,
+            ctx,
+            attn_mask=mask[:, -max_mem_len:]
+        )
+        x = x + attended
+        
+        # Feed forward
+        x = x + self.ff(self.norm2(x))
+        return x
+    
+
+dataset = WikiDataset(tokens=40)
 
 train_dataset, test_dataset = random_split(dataset, [int(0.85*len(dataset)), len(dataset) - int(0.85*len(dataset))])
 
@@ -195,17 +341,18 @@ train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
 vocab_size = max(dataset.words)+1
-emb_size = 256
+emb_size = 600
 output_size = vocab_size
-hidden_size = 256
-num_steps = 5
+hidden_size = 600
+num_steps = 10
+num_heads = 10
 
 num_epochs = 1
 
-model = GPT2Model(vocab_size, emb_size, hidden_size, output_size, num_steps)
+model = NanoModel(vocab_size, emb_size, hidden_size, output_size, num_steps, num_heads)
 model = model.to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = th.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.0001)
+optimizer = th.optim.AdamW(model.parameters(), lr=0.00005, weight_decay=0.0001)
 
 
 if __name__ == "__main__":
@@ -219,22 +366,54 @@ if __name__ == "__main__":
     print(f"Word Decode: {decode_text(test_dataset[1][0].tolist())}")
 
     with th.inference_mode():
-        sequence_input = "Argentina es"
+        sequence_input = "Argentina es una tierra de"
         encode = encode_text(sequence_input)
         input_tensor = th.tensor([encode], dtype=th.long)
         
+        out_put_ids: list[int] = []
+        
         input_tensor = input_tensor.to(device)
 
-        out = model(input_tensor)
+        out, mems = model(input_tensor)
 
         predicted_indices = out.argmax(dim=-1).tolist()[0]
-        console.print("Predicted Indices:", predicted_indices, style="bold green")
-        console.print("out.shape:", out.shape)
-        console.print("input_tensor.shape:", input_tensor.shape)
-        console.print("out.min(), out.max():", out.min().item(), out.max().item())
+        out_put_ids.extend(predicted_indices)
         sequence_output = sequence_input + decode_text(predicted_indices)
+        
+        for i in range(10):
+            input_tensor_i = th.tensor([encode_text(sequence_output)], dtype=th.long).to(device)
+            
+            
+            out, mems = model(input_tensor_i, mems)
 
-        print("Oración final:", sequence_output)
+            
+            last_logits = out[:, -2, :]
+            
+            processor = LogitsProcessorList([
+                RepetitionPenaltyLogitsProcessor(penalty=1.2)
+            ])
+            
+            warped_logits = processor(input_ids=input_tensor, scores=last_logits)
+            
+            warper = TopPLogitsWarper(top_p=0.9)
+            warped_logits = warper(input_tensor, warped_logits)
+            
+            probs = th.softmax(warped_logits, dim=-1)
+            next_id = th.multinomial(probs, num_samples=1)
+            
+            out_put_ids.append(next_id.item())
+            
+            input_tensor = th.cat([input_tensor, next_id], dim=1)
+            
+        console.print("Out Put Ids:", out_put_ids)
+
+        decode_data = decode_text(out_put_ids)
+        
+        console.print("Decode Ids:", decode_data)
+
+        console.print("Original Sequence:", decode_data)
+            
+        console.print("Final Sequence only spanish:", only_spanish_letters(decode_data))
 
 
     for epoch in range(num_epochs):
@@ -268,13 +447,22 @@ if __name__ == "__main__":
                 target = batch[1]
                 input_words = input_words.to(device)
                 target = target.to(device)
+                mems = None
                 try:
-                    out = model(input_words)
-                except Exception as e:
-                    print("Error:", e)
-                    print("Word:", input_words)
-                    continue
+                    if not mems is None:
+                        out, mems = model(input_words, mems)
+                    else:
+                        out, mems = model(input_words)
+                        
+                    if th.isnan(out).any().item():
+                        console.print("NaN en out!")
 
+                except Exception as e:
+                    console.print_exception(show_locals=True)
+                    console.print("Error:", e)
+                    console.print("Word:", input_words)
+                    continue
+                
 
                 loss = criterion(out[:, -2, :], target.squeeze(-1).long())
                 total_loss_train.append(loss.item())
@@ -318,9 +506,13 @@ if __name__ == "__main__":
                 target = batch[1]
                 input_words = input_words.to(device)
                 target = target.to(device)
-
+                memsm = None
+                
                 try:
-                    out = model(input_words)
+                    if not mems is None:
+                        out, mems = model(input_words, mems)
+                    else:
+                        out, mems = model(input_words)
                 except Exception as e:
                     print("Error:", e)
                     print("Word:", input_words)
@@ -375,14 +567,16 @@ if __name__ == "__main__":
         
         input_tensor = input_tensor.to(device)
 
-        out = model(input_tensor)
+        out, mems = model(input_tensor)
 
         predicted_indices = out.argmax(dim=-1).tolist()[0]
         out_put_ids.extend(predicted_indices)
         sequence_output = sequence_input + decode_text(predicted_indices)
         
         for i in range(10):
-            out = model(th.tensor([encode_text(sequence_output)], dtype=th.long).to(device))
+            input_tensor_i = th.tensor([encode_text(sequence_output)], dtype=th.long).to(device)
+            
+            out, mems = model(input_tensor_i, mems)
             
             last_logits = out[:, -2, :]
             
@@ -408,9 +602,9 @@ if __name__ == "__main__":
         
         console.print("Decode Ids:", decode_data)
 
-        console.print("Original Sequence:", sequence_input + decode_data)
+        console.print("Original Sequence:", decode_data)
             
-        console.print("Final Sequence only spanish:", only_spanish_letters(sequence_input + decode_data))
+        console.print("Final Sequence only spanish:", only_spanish_letters(decode_data))
         
     if df_loss["Loss Train"].isnull().all():
         console.print("No hay datos de pérdida de entrenamiento para mostrar.", style="bold red")
