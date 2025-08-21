@@ -252,7 +252,7 @@ class NanoModel(nn.Module):
         current_hidden = pos_emb
         
         # Process through transformer blocks with memory
-        for _, (transformer_block, m) in enumerate(zip(self.transformer_blocks, mems)):
+        for transformer_block, m in zip(self.transformer_blocks, mems):
             # Extend attention mask for memory tokens
             if m.numel() > 0:
                 mem_len = m.size(1)

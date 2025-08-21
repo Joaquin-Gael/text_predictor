@@ -1,4 +1,5 @@
 import reflex as rx
+from pathlib import Path
 
 config = rx.Config(
     app_name="text_predictor",
@@ -7,3 +8,5 @@ config = rx.Config(
         rx.plugins.TailwindV4Plugin(),
     ],
 )
+
+styles_path = Path(__file__).parent / "assets" / "css" / "main.css"
