@@ -2,20 +2,21 @@ import reflex as rx
 
 from rxconfig import styles_path
 
-from .components import navbar
+from .components import navbar, chat, input_prompt
+from .api import ChatState
 
 
 @rx.page("/")
 def index():
     return rx.vstack(
-        navbar(),
+        navbar("Text Predictor"),
         rx.center(
-            rx.text("Hello, Reflex!"),
-            border_radius="15px",
-            border_width="thick",
-            width="50%",
-            margin_top="20vh",
-            margin="auto",
+            rx.box(
+                chat(),
+                input_prompt(),
+                class_name="main p-6 bg-white border border-gray-200 rounded-lg shadow-sm dark:bg-gray-800 dark:border-gray-700 w-[100vw] sm:w-[50vw]",
+            ),
+            width="100vw",
         )
     )
 

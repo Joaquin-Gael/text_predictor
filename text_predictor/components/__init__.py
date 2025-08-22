@@ -1,4 +1,4 @@
-from .main import navbar
+from .main import navbar, chat, input_prompt
 
 
-__all__ = ["navbar"]
+__all__ = ["navbar", "chat", "input_prompt"]

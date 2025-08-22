@@ -1,13 +1,29 @@
 import reflex as rx
 
-from ..styles import navbar
+from typing import Callable
+from ..api import ChatState
+
+BUTTON_CLASS_NAME = "text-white bg-purple-700 hover:bg-purple-800 focus:outline-none focus:ring-4 focus:ring-purple-300 font-medium rounded-full text-sm px-5 py-2.5 text-center mb-2"
+INPUT_CLASS_NAME = "flex-1 bg-slate-800 border-slate-600 text-white placeholder:text-slate-400 focus:border-purple-500 focus:ring-purple-500/20 rounded-lg"
 
 def navbar_link(text: str, url: str) -> rx.Component:
     return rx.link(
         rx.text(text, size="4", weight="medium"), href=url
     )
+    
+def navbar_button(text: str = "", url: str = "") -> rx.Component:
+    return rx.link(
+        rx.button(
+            text,
+            class_name=BUTTON_CLASS_NAME
+        ), 
+        href=url,
+    )
+    
+def navbar_button_with_action(text: str = "", action: Callable[[], None] = None) -> rx.Component:
+    return rx.button(text, on_click=action, class_name=BUTTON_CLASS_NAME)
 
-def navbar() -> rx.Component:
+def navbar(name: str = "") -> rx.Component:
     return rx.box(
         rx.desktop_only(
             rx.hstack(
@@ -19,16 +35,14 @@ def navbar() -> rx.Component:
                         border_radius="25%",
                     ),
                     rx.heading(
-                        "Reflex", size="7", weight="bold"
+                        name, weight="bold"
                     ),
                     align_items="center",
                 ),
                 rx.hstack(
-                    navbar_link("Home", "/#"),
-                    navbar_link("About", "/#"),
-                    navbar_link("Pricing", "/#"),
-                    navbar_link("Contact", "/#"),
-                    justify="end",
+                    navbar_button("View on GitHub"),
+                    justify="center",
+                    align_items="center",
                     spacing="5",
                 ),
                 justify="between",
@@ -40,12 +54,12 @@ def navbar() -> rx.Component:
                 rx.hstack(
                     rx.image(
                         src="/logo.jpg",
-                        width="2em",
+                        width="1em",
                         height="auto",
                         border_radius="25%",
                     ),
                     rx.heading(
-                        "Reflex", size="6", weight="bold"
+                        "Reflex", weight="bold"
                     ),
                     align_items="center",
                 ),
@@ -65,10 +79,77 @@ def navbar() -> rx.Component:
                 align_items="center",
             ),
         ),
-        padding="1em",
         position="fixed",
         top="0px",
         z_index="5",
         width="100%",
         class_name="navbar",
+    )
+
+
+def _message_bubble(msg: dict) -> rx.Component:
+    is_user = (msg.get("role") == "user")
+    user_classes = "max-w-[75%] px-3 py-2 rounded-2xl bg-purple-600 text-white ml-auto"
+    bot_classes = "max-w-[75%] px-3 py-2 rounded-2xl bg-gray-700 text-white mr-auto"
+    return rx.cond(
+        is_user,
+        rx.hstack(
+            rx.image(
+                src="/defaul-avatar.png",
+                width="2.25em",
+                height="auto",
+                border_radius="25%",
+            ),
+            rx.box(
+                rx.text(msg.get("text", "")),
+                class_name=user_classes,
+            ),
+            justify="end",
+            width="100%",
+        ),
+        rx.hstack(
+            rx.image(
+                src="/assets/defaul-avatar.png",
+                width="2.25em",
+                height="auto",
+                border_radius="25%",
+            ),
+            rx.box(
+                rx.text(msg.get("text", "")),
+                class_name=bot_classes,
+            ),
+            justify="start",
+            width="100%",
+        ),
+    )
+    
+
+def chat() -> rx.Component:
+    return rx.box(
+        rx.vstack(
+            rx.foreach(ChatState.messages, lambda m: _message_bubble(m)),
+            class_name="space-y-3 p-4",
+        ),
+        class_name="chat h-[60vh] w-full sm:w-[47.5vw] overflow-y-auto bg-black/20 border border-white/10 rounded-xl",
+    )
+
+
+def input_prompt() -> rx.Component:
+    return rx.box(
+        rx.form(
+            rx.hstack(
+                rx.input(
+                    placeholder="Escribe un mensaje...",
+                    type="text",
+                    value=ChatState.prompt,
+                    on_change=ChatState.set_prompt,
+                    class_name=INPUT_CLASS_NAME,
+                ),
+                rx.button("Enviar", class_name=BUTTON_CLASS_NAME),
+                class_name="w-full gap-2",
+            ),
+            on_submit=ChatState.send,
+            class_name="w-full",
+        ),
+        class_name="p-6 border-t border-purple-500/20 bg-slate-800/30"
     )
