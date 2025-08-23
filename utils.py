@@ -5,6 +5,8 @@ import rich
 import tiktoken
 
 import requests as rq
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 import re
@@ -72,9 +74,28 @@ def only_spanish_letters(text: str) -> str | None:
     return word
 
 
+session = rq.Session()
+retry = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=[ 500, 502, 503, 504 ],
+    allowed_methods=frozenset(["HEAD", "GET", "OPTIONS"])
+)
+session.mount("https://", HTTPAdapter(max_retries=retry))
+session.mount("http://", HTTPAdapter(max_retries=retry))
+session.timeout = 10
+
+def get_html(url: str) -> str | None:
+    try:
+        html = session.get(url).text
+    except:
+        console.print_exception(show_locals=True)
+        return None
+    return html
+
 def get_data(tokens: int = 10) -> pl.DataFrame | None:
     try:
-        html_wiki = rq.get("https://es.wikipedia.org/wiki/Argentina").text
+        html_wiki = get_html("https://es.wikipedia.org/wiki/Argentina")
 
         python_sub_html = [
             "",
@@ -88,16 +109,17 @@ def get_data(tokens: int = 10) -> pl.DataFrame | None:
             "introduction.html",
             "introduction.html#using-python-as-a-calculator"
         ]
+        
+        soup = []
 
-        soup = BeautifulSoup(html_wiki, features="lxml")
-        soup = soup.get_text().splitlines()
+        soup.extend(BeautifulSoup(html_wiki, features="lxml").get_text().splitlines()) if html_wiki else None
         for sub_html in python_sub_html:
-            html_python_docs_es = rq.get("https://docs.python.org/es/3/tutorial/"+sub_html).text
-            soup.extend(BeautifulSoup(html_python_docs_es, features="lxml").get_text().splitlines())
+            html_python_docs_es = get_html("https://docs.python.org/es/3/tutorial/"+sub_html)
+            soup.extend(BeautifulSoup(html_python_docs_es, features="lxml").get_text().splitlines()) if html_python_docs_es else None
 
-        html_python_wiki = rq.get("https://es.wikipedia.org/wiki/Python").text
+        html_python_wiki = get_html("https://es.wikipedia.org/wiki/Python")
 
-        soup.extend(BeautifulSoup(html_python_wiki, features="lxml").get_text().splitlines())
+        soup.extend(BeautifulSoup(html_python_wiki, features="lxml").get_text().splitlines()) if html_python_wiki else None
 
         more_html_data = [
             "https://es.wikipedia.org/wiki/Albert_Einstein",
@@ -122,8 +144,8 @@ def get_data(tokens: int = 10) -> pl.DataFrame | None:
         ]
 
         for more_html in more_html_data:
-            html_more_data = rq.get(more_html).text
-            soup.extend(BeautifulSoup(html_more_data, features="lxml").get_text().splitlines())
+            html_more_data = get_html(more_html)
+            soup.extend(BeautifulSoup(html_more_data, features="lxml").get_text().splitlines()) if html_more_data else None
 
         console.print("Longitud de la sopa de texto: ", len(soup))
 
@@ -182,13 +204,15 @@ def get_data(tokens: int = 10) -> pl.DataFrame | None:
                 for i in range(len(encoded)-tokens):
 
                     for j in range(tokens):
+
                         couple[f"token{j}"].append(encoded[i+j])
+                        
+                        # Eliminado: if j == len(tokens): ... y encoded("<end>")
 
-                    preds = encoded[i+tokens+1] if i+tokens+1 < len(encoded) else 0
+                    # Etiqueta: siguiente token inmediato tras la ventana
+                    pred = encoded[i+tokens] if i+tokens < len(encoded) else 0
 
-                    p0 = int(preds)
-
-                    couple["pred0"].append(p0)
+                    couple["pred0"].append(int(pred))
 
 
                 for i in range(tokens):

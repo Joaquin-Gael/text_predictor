@@ -1,10 +1,10 @@
 import reflex as rx
 from typing import List, Dict
-from rxconfig import ModelState
+from rxconfig import ModelState, set_device
 
 model_state = ModelState()
 
-model_state.to("cpu")
+set_device("cpu")
 
 class ChatState(rx.State):
     """Estado para un chat multipropósito."""

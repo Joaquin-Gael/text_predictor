@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch as th
 
-from main import model
+from main import model, get_device
 from utils import encode_text, decode_text
 
 tailwind_config = {
@@ -28,27 +28,49 @@ config = rx.Config(
 
 styles_path = Path(__file__).parent / "assets" / "css" / "main.css"
 
+_current_device = None
+
+def set_device(device_str: str):
+    """Mover el modelo al dispositivo indicado y recordar el estado actual.
+    Uso: set_device("cuda") o set_device("cpu").
+    """
+    global _current_device
+    device = th.device(device_str)
+    model.to(device)
+    _current_device = device
+    print(f"Model moved to {device}")
+    print(f"Model device: {next(model.parameters()).device}")
+
+
+def current_device():
+    """Devolver el dispositivo efectivo actual (del modelo)."""
+    if _current_device is not None:
+        return _current_device
+    # fallback al device del propio modelo si no fue seteado aún
+    try:
+        return next(model.parameters()).device
+    except Exception:
+        return th.device("cuda" if th.cuda.is_available() else "cpu")
+
+
 class ModelState:
     """Estado para el modelo."""
     
     def __init__(self):
         self.model = model
-        self.device = "cpu"
         self.tokenizer = encode_text
         self.decode_text = decode_text
         
     def to(self, device: str):
         """Cambiar el dispositivo del modelo."""
-        self.device = device
-        self.model.to(self.device)
+        set_device(device)
         
-        print(f"Model moved to {self.device}")
-        print(f"Model device: {next(self.model.parameters()).device}")
-
     def predict(self, text: str) -> str:
         """Hacer una predicción basada en el texto de entrada."""
         self.model.eval()
         with th.inference_mode():
-            input_ids = th.tensor([self.tokenizer(text)], dtype=th.long, device=self.device)
-            output_ids = self.model(input_ids)
-        return self.decode_text(output_ids[0])
+            dev = current_device()
+            input_ids = th.tensor([self.tokenizer(text)], dtype=th.long, device=dev)
+            output_ids, _ = self.model(input_ids)
+            print(f"loggits: {output_ids.tolist()}")
+        return self.decode_text(output_ids.tolist())

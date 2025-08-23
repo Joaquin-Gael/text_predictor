@@ -1,5 +1,6 @@
 from typing import Optional
 
+from reflex.components.el import em
 import torch as th
 from torch import nn
 import torch.nn.functional as F
@@ -23,6 +24,12 @@ from rich.progress import (
 from pathlib import Path
 
 from transformers import LogitsProcessorList, RepetitionPenaltyLogitsProcessor, TopPLogitsWarper
+from transformers import (
+    LogitsProcessorList,
+    RepetitionPenaltyLogitsProcessor,
+    TopPLogitsWarper,
+    NoRepeatNGramLogitsProcessor,
+)
 
 import itertools
 
@@ -35,6 +42,19 @@ console.print(f"reserved: {th.cuda.memory_reserved() / 1024**3:.2f} GiB")
 console.print(th.cuda.memory_summary(device="cuda", abbreviated=True))
 
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
+
+
+def get_device(train: bool = False):
+    """Devuelve el dispositivo actual del modelo global si existe, o CPU/GPU por defecto.
+    Esta función permite que, moviendo el modelo con una sola línea, el resto del código use ese device.
+    """
+    global model
+    try:
+        if train:
+            return device
+        return next(model.parameters()).device
+    except Exception:
+        return device
 
 
 class WikiDataset(Dataset):
@@ -118,7 +138,8 @@ class PositionalEncoding(nn.Module):
         if seq_len > self.vocab_size:
             raise ValueError("Sequence length > max_len (pos emb)")
 
-        pos_id = th.arange(seq_len, dtype=th.long).to(device).unsqueeze(0)
+        # Ensure position ids are created on the same device as input_words
+        pos_id = th.arange(seq_len, dtype=th.long, device=input_words.device).unsqueeze(0)
         pos_emb = self.embedding(pos_id)
         return pos_emb + input_words
 
@@ -159,11 +180,12 @@ class TransformerModel(nn.Module):
         emb = self.embedding(input_words)
         enc = self.positional_encoding(emb)
 
+        # Build mask on the same device as the inputs to avoid device mismatches
         _mask = th.triu(
             th.ones(
                 (input_words.size(1), input_words.size(1)),
                 dtype=th.bool,
-                device=device
+                device=input_words.device
             )
         )
 
@@ -185,6 +207,80 @@ class GPT2Model(nn.Module):
             out = transformer(input_words)
         out = self.output_layer(out)
         return out
+
+class LineAttention(nn.Module):
+    def __init__(self, emb_size, num_heads, dropout=0.1) -> None:
+        super(LineAttention, self).__init__()
+        
+
+class TransformerXLBlock(nn.Module):
+    def __init__(self, emb_size, hidden_size, num_heads, dropout=0.1):
+        super().__init__()
+        
+        self.attention = nn.MultiheadAttention(emb_size, num_heads, dropout, batch_first=True)
+        
+        self.norm = nn.LayerNorm(emb_size)
+
+        self.norm1 = nn.LayerNorm(emb_size)
+        self.norm2 = nn.LayerNorm(emb_size)
+        
+        self.projection = nn.Linear(emb_size, emb_size)
+                
+        self.ff = nn.Sequential(
+            nn.Linear(emb_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size * 2),
+            nn.GELU(),
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, emb_size),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, x, mem, u, v, mask=None, max_mem_len=512):
+        norm = self.norm(x)
+        
+        B, L, E = norm.shape
+
+        # Alinear memoria al batch/emb actual
+        if mem.numel() > 0:
+            if mem.dim() != 3 or mem.size(0) != B or mem.size(2) != E:
+                mem = norm[:, 0:0, :]  # (B, 0, E)
+        else:
+            # asegurar tensor 3D vacío consistente
+            mem = norm[:, 0:0, :]
+
+        if th.isnan(norm).any().item():
+            print("NaN values in norm")
+
+        if mem.numel() > 0:
+            MEM_B, MEM_L, MEM_E = mem.shape
+            if MEM_L == 0:
+                ctx = self.projection(th.cat([mem, norm], dim=1)[:, -L:, :])
+            else:
+                ctx = self.projection(th.cat([mem, norm], dim=1)[:, -MEM_L:, :])
+        else:
+            ctx = self.projection(norm)
+            MEM_L = L
+        
+        # Máscara debe coincidir con (L, MEM_L) o (L, L)
+        if mask is not None:
+            total_k = ctx.size(1)
+            attn_mask = mask[:, :total_k]
+        else:
+            attn_mask = None
+
+        attended, _ = self.attention(
+            norm,
+            ctx,
+            ctx,
+            attn_mask=attn_mask
+        )
+        x = x + attended
+        
+        x = x + self.ff(self.norm2(x))
+        
+        return x
 
 class NanoModel(nn.Module):
     def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, head_num, mem_len=512):
@@ -208,8 +304,8 @@ class NanoModel(nn.Module):
         self.transformer_blocks = nn.ModuleList([
             TransformerXLBlock(
                 emb_size,
-                head_num,
                 hidden_size,
+                head_num,
                 dropout=0.1
             ) for _ in range(num_steps)
         ])
@@ -222,20 +318,31 @@ class NanoModel(nn.Module):
         
     def _update_mems(self, hidden_states, mems):
         # Update memory with current hidden states
-        if len(mems) == 0:
-            mems = [th.empty(0, dtype=hidden_states.dtype, device=device)] * len(self.transformer_blocks)
-        assert len(hidden_states) == len(mems)
-        
+        # mems y hidden_states deben coincidir en batch y emb
         with th.no_grad():
             new_mems = []
             for i in range(len(hidden_states)):
-                cat = th.cat([mems[i], hidden_states[i]], dim=1)
+                hs = hidden_states[i]
+                if i < len(mems):
+                    m = mems[i]
+                else:
+                    m = hs[:, 0:0, :]  # (B, 0, E)
+
+                # Normalizar shape de memoria
+                if m.dim() != 3 or m.size(0) != hs.size(0) or m.size(2) != hs.size(2):
+                    m = hs[:, 0:0, :]
+
+                cat = th.cat([m, hs], dim=1)
                 new_mems.append(cat[:, -self.mem_len:].detach())
         return new_mems
 
     def forward(self, input_words, mems=None):
         if mems is None:
-            mems = [th.empty(0, dtype=th.float, device=device)] * len(self.transformer_blocks)
+            # inicializar mems vacías con shape (B, 0, E)
+            B = input_words.size(0)
+            dev = input_words.device
+            dt = th.float
+            mems = [th.zeros((B, 0, self.emb_size), dtype=dt, device=dev)] * len(self.transformer_blocks)
             
         # Word embeddings + positional encoding
         word_emb = self.embedding(input_words)
@@ -244,7 +351,7 @@ class NanoModel(nn.Module):
         # Create causal attention mask
         seq_len = input_words.size(1)
         attn_mask = th.triu(
-            th.ones((seq_len, seq_len), dtype=th.bool, device=device),
+            th.ones((seq_len, seq_len), dtype=th.bool, device=input_words.device),
             diagonal=1
         )
         
@@ -256,7 +363,7 @@ class NanoModel(nn.Module):
             # Extend attention mask for memory tokens
             if m.numel() > 0:
                 mem_len = m.size(1)
-                mem_mask = th.zeros((seq_len, mem_len), dtype=th.bool, device=device)
+                mem_mask = th.zeros((seq_len, mem_len), dtype=th.bool, device=input_words.device)
                 attn_mask_extended = th.cat([mem_mask, attn_mask], dim=1)
             else:
                 attn_mask_extended = attn_mask
@@ -277,58 +384,27 @@ class NanoModel(nn.Module):
         output = self.output_layer(current_hidden)
         
         return output, new_mems
-
-class TransformerXLBlock(nn.Module):
-    def __init__(self, emb_size, hidden_size, num_heads, dropout=0.1):
-        super().__init__()
-        
-        self.attention = nn.MultiheadAttention(emb_size, num_heads, dropout, batch_first=True)
-        
-        self.norm = nn.LayerNorm(emb_size)
-
-        self.norm1 = nn.LayerNorm(emb_size)
-        self.norm2 = nn.LayerNorm(emb_size)
-        
-        self.ff = nn.Sequential(
-            nn.Linear(emb_size, hidden_size * 4),
-            nn.GELU(),
-            nn.Linear(hidden_size * 4, hidden_size * 2),
-            nn.GELU(),
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, emb_size),
-            nn.Dropout(dropout)
-        )
-        
-    def forward(self, x, mem, u, v, mask=None, max_mem_len=512):
-        norm = self.norm(x)
-        
-        B, L, E = norm.shape
-
-        
-        if th.isnan(norm).any().item():
-            print("NaN values in norm")
-
-
-        if mem.numel() > 0:
-            ctx = th.cat([mem, norm], dim=1)[:, -max_mem_len:, :]
-            
-        else:
-            ctx = norm
-
-
-        attended, _ = self.attention(
-            norm,
-            ctx,
-            ctx,
-            attn_mask=mask[:, -max_mem_len:]
-        )
-        x = x + attended
-        
-        # Feed forward
-        x = x + self.ff(self.norm2(x))
-        return x
     
+    def generate(self, input_words, mems=None, max_tokens: int = 10):
+        """Generar secuencia de tokens a partir de entrada."""
+        loggits, mems = self(input_words, mems)
+        out_ids = []
+        for _ in range(max_tokens-1):
+            loggits = loggits[:, -1, :]
+            processor = LogitsProcessorList([
+                RepetitionPenaltyLogitsProcessor(penalty=1.3),
+                NoRepeatNGramLogitsProcessor(no_repeat_ngram_size=3),
+            ])
+            warper = TopPLogitsWarper(top_p=0.9)
+            loggits = processor(input_ids=input_words, scores=loggits)
+            loggits = warper(input_ids=input_words, scores=loggits)
+            probs = th.softmax(loggits, dim=-1)
+            next_token = th.multinomial(probs, num_samples=1)
+            out_ids.append(next_token.item())
+            input_words = th.cat([input_words, next_token], dim=1)
+            out = self(input_words, mems)
+        return out_ids
+
 
 dataset = WikiDataset(tokens=40)
 
@@ -347,12 +423,57 @@ hidden_size = 600
 num_steps = 10
 num_heads = 10
 
-num_epochs = 1
+num_epochs = 2
 
 model = NanoModel(vocab_size, emb_size, hidden_size, output_size, num_steps, num_heads)
-model = model.to(device)
+model = model.to(get_device(train=True))
 criterion = nn.CrossEntropyLoss()
 optimizer = th.optim.AdamW(model.parameters(), lr=0.00005, weight_decay=0.0001)
+
+def text_test(model: NanoModel):
+    with th.inference_mode():
+        sequence_input = "Argentina es una tierra de"
+        encode = encode_text(sequence_input)
+        input_tensor = th.tensor([encode], dtype=th.long).to(get_device(train=True))
+        
+        out_put_ids: list[int] = []
+        sequence_output = sequence_input
+
+        # primer forward para inicializar mems
+        out, mems = model(input_tensor)
+
+        for _ in range(10):
+            # usar el último logit correspondiente al último token del input actual
+            last_logits = out[:, -1, :]
+            processor = LogitsProcessorList([
+                RepetitionPenaltyLogitsProcessor(penalty=1.3),
+                NoRepeatNGramLogitsProcessor(no_repeat_ngram_size=3),
+            ])
+
+            warped_logits = processor(input_ids=input_tensor, scores=last_logits)
+            warper = TopPLogitsWarper(top_p=0.9)
+            warped_logits = warper(input_tensor, warped_logits)
+            probs = th.softmax(warped_logits, dim=-1)
+            next_id = th.multinomial(probs, num_samples=1)  # [B, 1]
+
+            out_put_ids.append(next_id.item())
+
+            # actualizar secuencia y entrada
+            input_tensor = th.cat([input_tensor, next_id.to(input_tensor.device)], dim=1)
+            sequence_output += decode_text([next_id.item()])
+
+            # siguiente paso: sólo el nuevo token y memoria
+            out, mems = model(next_id.to(get_device(train=True)), mems)
+
+        console.print("Out Put Ids:", out_put_ids)
+
+        decode_data = decode_text(out_put_ids)
+        
+        console.print("Decode Ids:", decode_data)
+
+        console.print("Original Sequence:", sequence_output)
+            
+        console.print("Final Sequence only spanish:", only_spanish_letters(sequence_output))
 
 
 if __name__ == "__main__":
@@ -365,56 +486,7 @@ if __name__ == "__main__":
     print(f"Word Size: {test_dataset[1][0].tolist()}")
     print(f"Word Decode: {decode_text(test_dataset[1][0].tolist())}")
 
-    with th.inference_mode():
-        sequence_input = "Argentina es una tierra de"
-        encode = encode_text(sequence_input)
-        input_tensor = th.tensor([encode], dtype=th.long)
-        
-        out_put_ids: list[int] = []
-        
-        input_tensor = input_tensor.to(device)
-
-        out, mems = model(input_tensor)
-
-        predicted_indices = out.argmax(dim=-1).tolist()[0]
-        out_put_ids.extend(predicted_indices)
-        sequence_output = sequence_input + decode_text(predicted_indices)
-        
-        for i in range(10):
-            input_tensor_i = th.tensor([encode_text(sequence_output)], dtype=th.long).to(device)
-            
-            
-            out, mems = model(input_tensor_i, mems)
-
-            
-            last_logits = out[:, -2, :]
-            
-            processor = LogitsProcessorList([
-                RepetitionPenaltyLogitsProcessor(penalty=1.2)
-            ])
-            
-            warped_logits = processor(input_ids=input_tensor, scores=last_logits)
-            
-            warper = TopPLogitsWarper(top_p=0.9)
-            warped_logits = warper(input_tensor, warped_logits)
-            
-            probs = th.softmax(warped_logits, dim=-1)
-            next_id = th.multinomial(probs, num_samples=1)
-            
-            out_put_ids.append(next_id.item())
-            
-            input_tensor = th.cat([input_tensor, next_id], dim=1)
-            
-        console.print("Out Put Ids:", out_put_ids)
-
-        decode_data = decode_text(out_put_ids)
-        
-        console.print("Decode Ids:", decode_data)
-
-        console.print("Original Sequence:", decode_data)
-            
-        console.print("Final Sequence only spanish:", only_spanish_letters(decode_data))
-
+    text_test(model)
 
     for epoch in range(num_epochs):
         model.train()
@@ -445,8 +517,8 @@ if __name__ == "__main__":
 
                 input_words = batch[0]
                 target = batch[1]
-                input_words = input_words.to(device)
-                target = target.to(device)
+                input_words = input_words.to(get_device(train=True))
+                target = target.to(get_device(train=True))
                 mems = None
                 try:
                     if not mems is None:
@@ -504,8 +576,8 @@ if __name__ == "__main__":
 
                 input_words = batch[0]
                 target = batch[1]
-                input_words = input_words.to(device)
-                target = target.to(device)
+                input_words = input_words.to(get_device(train=True))
+                target = target.to(get_device(train=True))
                 memsm = None
                 
                 try:
@@ -514,8 +586,9 @@ if __name__ == "__main__":
                     else:
                         out, mems = model(input_words)
                 except Exception as e:
-                    print("Error:", e)
-                    print("Word:", input_words)
+                    console.print("Error:", e)
+                    console.print("Word:", input_words)
+                    console.print_exception(show_locals=True)
                     continue
 
                 loss = criterion(out[:, -2, :], target.squeeze(-1).long())
@@ -556,55 +629,7 @@ if __name__ == "__main__":
 
         fig.show()
 
-
-
-    with th.inference_mode():
-        sequence_input = "Argentina es"
-        encode = encode_text(sequence_input)
-        input_tensor = th.tensor([encode], dtype=th.long)
-        
-        out_put_ids: list[int] = []
-        
-        input_tensor = input_tensor.to(device)
-
-        out, mems = model(input_tensor)
-
-        predicted_indices = out.argmax(dim=-1).tolist()[0]
-        out_put_ids.extend(predicted_indices)
-        sequence_output = sequence_input + decode_text(predicted_indices)
-        
-        for i in range(10):
-            input_tensor_i = th.tensor([encode_text(sequence_output)], dtype=th.long).to(device)
-            
-            out, mems = model(input_tensor_i, mems)
-            
-            last_logits = out[:, -2, :]
-            
-            processor = LogitsProcessorList([
-                RepetitionPenaltyLogitsProcessor(penalty=1.2)
-            ])
-            
-            warped_logits = processor(input_ids=input_tensor, scores=last_logits)
-            
-            warper = TopPLogitsWarper(top_p=0.9)
-            warped_logits = warper(input_tensor, warped_logits)
-            
-            probs = th.softmax(warped_logits, dim=-1)
-            next_id = th.multinomial(probs, num_samples=1)
-            
-            out_put_ids.append(next_id.item())
-            
-            input_tensor = th.cat([input_tensor, next_id], dim=1)
-            
-        console.print("Out Put Ids:", out_put_ids)
-
-        decode_data = decode_text(out_put_ids)
-        
-        console.print("Decode Ids:", decode_data)
-
-        console.print("Original Sequence:", decode_data)
-            
-        console.print("Final Sequence only spanish:", only_spanish_letters(decode_data))
+    text_test(model)
         
     if df_loss["Loss Train"].isnull().all():
         console.print("No hay datos de pérdida de entrenamiento para mostrar.", style="bold red")

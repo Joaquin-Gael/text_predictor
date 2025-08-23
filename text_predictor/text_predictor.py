@@ -9,7 +9,7 @@ from .api import ChatState
 @rx.page("/")
 def index():
     return rx.vstack(
-        navbar("Text Predictor"),
+        navbar("Nano Chat"),
         rx.center(
             rx.box(
                 chat(),
