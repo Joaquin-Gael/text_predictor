@@ -53,7 +53,7 @@ def navbar(name: str = "") -> rx.Component:
             rx.hstack(
                 rx.hstack(
                     rx.image(
-                        src="/logo.jpg",
+                        src="/nano.png",
                         width="1em",
                         height="auto",
                         border_radius="25%",
@@ -94,25 +94,23 @@ def _message_bubble(msg: dict) -> rx.Component:
     return rx.cond(
         is_user,
         rx.hstack(
-            rx.image(
-                src="/defaul-avatar.png",
-                width="2.25em",
-                height="auto",
-                border_radius="25%",
-            ),
             rx.box(
                 rx.text(msg.get("text", "")),
                 class_name=user_classes,
+            ),
+            rx.avatar(
+                src="/img/defaul-avatar.png",
+                size="3",
+                fallback="U",
             ),
             justify="end",
             width="100%",
         ),
         rx.hstack(
-            rx.image(
-                src="/assets/defaul-avatar.png",
-                width="2.25em",
-                height="auto",
-                border_radius="25%",
+            rx.avatar(
+                src="/img/nano.png",
+                size="3",
+                fallback="N",
             ),
             rx.box(
                 rx.text(msg.get("text", "")),
