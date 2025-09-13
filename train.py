@@ -13,7 +13,7 @@ def cli():
     pass
 
 @cli.command()
-@click.option('--webs-urls', '-w', default=None, help='URLs de las webs a scrapear')
+@click.option('--webs-urls', '-w', multiple=True, help='URLs de las webs a scrapear')
 @click.option('--tokens', '-t', default=15, help='Número de tokens a scrapear')
 def collect(webs_urls, tokens):
     """Recolectar datos de las webs."""

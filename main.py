@@ -1,12 +1,12 @@
-from typing import Optional
-
-from reflex.components.el import em
+from turtle import forward
 import torch as th
-from torch import nn
+from torch import hsmm, nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 
 import numpy as np
+
+import math as mt
 
 import pandas as pd
 
@@ -21,8 +21,6 @@ from rich.progress import (
     TimeRemainingColumn
 )
 
-from pathlib import Path
-
 from transformers import LogitsProcessorList, RepetitionPenaltyLogitsProcessor, TopPLogitsWarper
 from transformers import (
     LogitsProcessorList,
@@ -33,7 +31,7 @@ from transformers import (
 
 import itertools
 
-from utils import get_data, decode_text, encode_text, only_spanish_letters, console, gen_graphic
+from utils import decode_text, encode_text, only_spanish_letters, console, gen_graphic
 
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 
@@ -42,6 +40,7 @@ def get_device(train: bool = False):
     try:
         if train:
             return device
+        return th.device("cpu")
     except Exception:
         return device
 
@@ -114,23 +113,26 @@ class WikiDataset(Dataset):
     def get_words(self):
         return decode_text(self.words)
 
-
 class PositionalEncoding(nn.Module):
-    def __init__(self, vocab_size, emb_size, pad_token=0):
-        super(PositionalEncoding, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, emb_size, padding_idx=pad_token)
-        self.vocab_size = vocab_size
 
-    def forward(self, input_words):
-        seq_len = input_words.size(1)
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
 
-        if seq_len > self.vocab_size:
-            raise ValueError("Sequence length > max_len (pos emb)")
+        position = th.arange(max_len).unsqueeze(1)
+        div_term = th.exp(th.arange(0, d_model, 2) * (-mt.log(10000.0) / d_model))
+        pe = th.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = th.sin(position * div_term)
+        pe[:, 0, 1::2] = th.cos(position * div_term)
+        self.register_buffer('pe', pe)
 
-
-        pos_id = th.arange(seq_len, dtype=th.long, device=input_words.device).unsqueeze(0)
-        pos_emb = self.embedding(pos_id)
-        return pos_emb + input_words
+    def forward(self, input_words: th.Tensor) -> th.Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        x = input_words + self.pe[:input_words.size(0)]
+        return self.dropout(x)
 
 class ComputeBlock(nn.Module):
     def __init__(self, emb_size, hidden_size, dropout=0.3):
@@ -226,7 +228,7 @@ class TransformerXLBlock(nn.Module):
             nn.Dropout(dropout)
         )
         
-    def forward(self, x, mem, u, v, mask=None, max_mem_len=512):
+    def forward(self, x, mem, mask=None, max_mem_len=512):
         norm = self.norm(x)
         
         B, L, E = norm.shape
@@ -271,6 +273,137 @@ class TransformerXLBlock(nn.Module):
         
         return x
 
+class LineTransformerXLHRMBlock(nn.Module):
+    def __init__(self, emb_size, hidden_size, num_heads, dropout=0.1):
+        super().__init__()
+        
+        self.attention = nn.MultiheadAttention(emb_size, num_heads, dropout, batch_first=True) # Por modificar
+        
+        self.norm = nn.LayerNorm(emb_size)
+
+        self.norm1 = nn.LayerNorm(emb_size)
+        self.norm2 = nn.LayerNorm(emb_size)
+        
+        self.projection = nn.Linear(emb_size, emb_size)
+                
+        self.ff = nn.Sequential(
+            nn.Linear(emb_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size * 2),
+            nn.GELU(),
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, emb_size),
+            nn.Dropout(dropout)
+        )
+        
+    def forward(self, x, mem_h, mem_l, mask=None, max_mem_len=512):
+        norm = self.norm(x)
+        
+        B, L, E = norm.shape
+
+        # Alinear memoria al batch/emb actual
+        if mem_l.numel() > 0:
+            if mem_l.dim() != 3 or mem_l.size(0) != B or mem_l.size(2) != E:
+                mem_l = norm[:, 0:0, :]  # (B, 0, E)
+        else:
+            # asegurar tensor 3D vacío consistente
+            mem_l = norm[:, 0:0, :]
+
+        if mem_h.numel() > 0:
+            if mem_h.dim() != 3 or mem_h.size(0) != B or mem_h.size(2) != E:
+                mem_h = norm[:, 0:0, :]  # (B, 0, E)
+        else:
+            # asegurar tensor 3D vacío consistente
+            mem_h = norm[:, 0:0, :]
+
+        if th.isnan(norm).any().item():
+            print("NaN values in norm")
+
+        if mem_l.numel() > 0:
+            MEM_B, MEM_L, MEM_E = mem_l.shape
+            if MEM_L == 0:
+                ctx = self.projection(th.cat([mem_l, norm], dim=1)[:, -L:, :])
+            else:
+                ctx = self.projection(th.cat([mem_l, norm], dim=1)[:, -MEM_L:, :])
+        else:
+            ctx = self.projection(norm)
+            MEM_L = L
+
+        if mem_h.numel() > 0:
+            MEM_B, MEM_L, MEM_E = mem_h.shape
+            if MEM_L == 0:
+                ctx = self.projection(th.cat([mem_h, mem_l], dim=1)[:, -L:, :])
+            else:
+                ctx = self.projection(th.cat([mem_h, mem_l], dim=1)[:, -MEM_L:, :])
+        else:
+            ctx = self.projection(mem_l)
+            MEM_L = L
+
+        # Máscara debe coincidir con (L, MEM_L) o (L, L)
+        if mask is not None:
+            total_k = ctx.size(1)
+            attn_mask = mask[:, :total_k]
+        else:
+            attn_mask = None
+
+        attended, _ = self.attention(
+            norm,
+            ctx,
+            ctx,
+            attn_mask=attn_mask
+        )
+        x = x + attended
+        
+        x = x + self.ff(self.norm2(x))
+        
+        return x
+
+class NanoModelHRM(nn.Module):
+    def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, head_num, dropout, mem_len=512) -> None:
+        super(NanoModelHRM, self).__init__()
+
+        self.mem_len = mem_len
+        self.hidden_size = hidden_size
+        self.emb_size = emb_size
+
+        self.embedding = nn.Embedding(vocab_size, emb_size)
+        self.pos_emb = PositionalEncoding(emb_size, dropout)
+
+        self.H_T = TransformerXLBlock(emb_size, hidden_size, head_num, dropout)
+        self.L_T = LineTransformerXLHRMBlock(emb_size, hidden_size, head_num, dropout)
+
+        self.output_layer = nn.Linear(emb_size, output_size, bias=False)
+        self.output_layer.weight = self.embedding.weight
+
+        self.mems_h_l = [None, None]
+
+    def forward(self, input_words: th.Tensor, mems: list[th.Tensor | None, th.Tensor | None] | None =None, N: int=2, T: int=2):
+        if mems is None:
+            mems = self.mems_h_l
+        if mems[0] is None and mems[1] is None:
+            B = input_words.size(0)
+            dev = input_words.device
+            dt = th.float
+            mems[0] = th.zeros((B, 0, self.emb_size), dtype=dt, device=dev)
+            mems[1] = th.zeros((B, 0, self.emb_size), dtype=dt, device=dev)
+
+        word_emb = self.embedding(input_words)
+        pos_emb = self.pos_emb(word_emb)
+
+        with th.no_grad():
+            for i in range(N * T - 1):
+                mems[1] = self.L_T(pos_emb, mems[1], mems[0])
+                if (i + 1) % T == 0:
+                    mems[0] = self.H_T(mems[1], mems[0])
+
+        mems[1] = self.L_T(pos_emb, mems[1], mems[0])
+        mems[0] = self.H_T(mems[1], mems[0])
+
+        out = self.output_layer(mems[0])
+
+        return out, mems
+
 class NanoModel(nn.Module):
     def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, head_num, dropout, mem_len=512):
         super(NanoModel, self).__init__()
@@ -281,13 +414,7 @@ class NanoModel(nn.Module):
         
         # Core components
         self.embedding = nn.Embedding(vocab_size, emb_size)
-        self.pos_emb = PositionalEncoding(vocab_size, emb_size)
-        
-        # Relative positional encoding
-        self.u = nn.Parameter(th.Tensor(head_num, emb_size // head_num))
-        self.v = nn.Parameter(th.Tensor(head_num, emb_size // head_num))
-        nn.init.xavier_normal_(self.u)
-        nn.init.xavier_normal_(self.v)
+        self.pos_emb = PositionalEncoding(emb_size, dropout)
         
         # Transformer-XL blocks
         self.transformer_blocks = nn.ModuleList([
@@ -360,8 +487,6 @@ class NanoModel(nn.Module):
             current_hidden = transformer_block(
                 current_hidden,
                 m,
-                self.u,
-                self.v,
                 attn_mask_extended
             )
             hidden_states.append(current_hidden)
@@ -441,7 +566,7 @@ def text_test(model: NanoModel):
         console.print("Final Sequence only spanish:", only_spanish_letters(sequence_output))
 
 
-def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_size, emb_size, dropout):
+def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, model_path:str, hidden_size:int, emb_size:int, dropout:float):
     
     console.print(th.cuda.get_device_name(0) if th.cuda.is_available() else "No CUDA available", style="bold green")
     console.print(f"allocated: {th.cuda.memory_allocated() / 1024**3:.2f} GiB") if th.cuda.is_available() else None
@@ -458,9 +583,9 @@ def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_
     num_heads = 10
     
     if model_path:
-        model = th.load(model_path)
+        model: NanoModelHRM = th.load(model_path)
     else:
-        model = NanoModel(vocab_size, emb_size, hidden_size, output_size, num_steps, num_heads, dropout)
+        model: NanoModelHRM = NanoModelHRM(vocab_size, emb_size, hidden_size, output_size, num_steps, num_heads, dropout)
 
     train_dataset, test_dataset = random_split(dataset, [int(0.85*len(dataset)), len(dataset) - int(0.85*len(dataset))])
 
@@ -471,7 +596,7 @@ def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     num_epochs = epochs
-
+    console.print(f"Model: {model}\n Device: {get_device(train=True)}", style="bold green")
     model = model.to(get_device(train=True))
     criterion = nn.CrossEntropyLoss()
     optimizer = th.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.0001)
@@ -519,23 +644,25 @@ def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_
                 input_words = input_words.to(get_device(train=True))
                 target = target.to(get_device(train=True))
                 mems = None
-                try:
-                    if not mems is None:
-                        out, mems = model(input_words, mems)
-                    else:
-                        out, mems = model(input_words)
-                        
-                    if th.isnan(out).any().item():
-                        console.print("NaN en out!")
 
-                except Exception as e:
-                    console.print_exception(show_locals=True)
-                    console.print("Error:", e)
-                    console.print("Word:", input_words)
-                    continue
-                
+                with th.amp.autocast("cuda"):
+                    try:
+                        if not mems is None:
+                            out, mems = model(input_words, mems)
+                        else:
+                            out, mems = model(input_words)
+                            
+                        if th.isnan(out).any().item():
+                            console.print("NaN en out!")
 
-                loss = criterion(out[:, -2, :], target.squeeze(-1).long())
+                    except Exception as e:
+                        console.print_exception(show_locals=True)
+                        console.print("Error:", e)
+                        console.print("Word:", input_words)
+                        continue
+                    
+
+                    loss = criterion(out[:, -2, :], target.squeeze(-1).long())
                 total_loss_train.append(loss.item())
                 loss.backward()
                 optimizer.step()
@@ -577,20 +704,21 @@ def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_
                 target = batch[1]
                 input_words = input_words.to(get_device(train=True))
                 target = target.to(get_device(train=True))
-                memsm = None
+                mems = None
                 
-                try:
-                    if not mems is None:
-                        out, mems = model(input_words, mems)
-                    else:
-                        out, mems = model(input_words)
-                except Exception as e:
-                    console.print("Error:", e)
-                    console.print("Word:", input_words)
-                    console.print_exception(show_locals=True)
-                    continue
+                with th.amp.autocast("cuda"):
+                    try:
+                        if not mems is None:
+                            out, mems = model(input_words, mems)
+                        else:
+                            out, mems = model(input_words)
+                    except Exception as e:
+                        console.print("Error:", e)
+                        console.print("Word:", input_words)
+                        console.print_exception(show_locals=True)
+                        continue
 
-                loss = criterion(out[:, -2, :], target.squeeze(-1).long())
+                    loss = criterion(out[:, -2, :], target.squeeze(-1).long())
                 total_loss_test.append(loss.item())
                 progress.update(
                     task,
@@ -600,8 +728,7 @@ def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_
                 )
 
 
-        print(f"Epoch {epoch}, Error: {sum(total_loss_test) / len(total_loss_test)}")
-
+        console.print(f"Epoch {epoch}, Error: {sum(total_loss_test) / len(total_loss_test)}")
 
 
         diff = len(total_loss_test) - len(total_loss_train)
@@ -625,8 +752,13 @@ def train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_
             len(total_loss_train),
             "Loss",
         )
+
+        model_name = f"model_{epochs}"
+
+        if model_path:
+            model_name = f"model_{int(model_path.strip("_.pth"))+epochs}"
         
-        th.save(model.state_dict(), f"model_{epoch}.pth")
+        th.save(model.state_dict(), f"./models/{model_name}.pth")
 
         fig.show()
         

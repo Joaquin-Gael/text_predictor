@@ -143,7 +143,7 @@ def get_html(url: str) -> str | None:
     try:
         # Añadir un retraso aleatorio entre peticiones (entre 1 y 5 segundos)
         wait_time = random.uniform(1, 5)
-        console.print(f"[bold blue]Esperando {wait_time:.2f} segundos antes de solicitar {url}...[/bold blue]")
+        #console.print(f"[bold blue]Esperando {wait_time:.2f} segundos antes de solicitar {url}...[/bold blue]")
         time.sleep(wait_time)
         
         # Realizar la petición con los headers personalizados
@@ -196,6 +196,58 @@ def apply_proxy_to_session(session, proxy):
         }
     return session
 
+def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], extensions:list[str] | None = None) -> list[str]:
+    if urls and extensions:
+        url = urls[0]
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold green]Descargando datos..."),
+            BarColumn(),
+            TextColumn("URL: {task.fields[url]}"),
+            TimeElapsedColumn(),
+            TextColumn("Status: {task.fields[status]}"),
+            TextColumn("[red]TimeOut: {task.fields[timeout]}")
+        ) as progress:
+            task = progress.add_task("Descargando...", total=len(urls), url="None", status="None", timeout=0.0)
+            for i, ext in enumerate(extensions):
+                html = get_html(url+ext)
+                if html:
+                    soup.extend(BeautifulSoup(html, features="lxml").get_text().splitlines())
+                    if i < len(extensions) - 1:
+                        wait_time = random.uniform(3, 8)
+                        progress.update(task, advance=1, url=url+ext, status="Success", timeout=wait_time)
+                        time.sleep(wait_time)
+                    else:
+                        progress.update(task, advance=1, url=url+ext, status="Success", timeout=0.0)
+                else:
+                    progress.update(task, advance=1, url=url+ext, status="Failed", timeout=0.0)
+    else:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]Descargando datos..."),
+            BarColumn(),
+            TextColumn("URL: {task.fields[url]}"),
+            TimeElapsedColumn(),
+            TextColumn("Status: {task.fields[status]}"),
+            TextColumn("[red]TimeOut: {task.fields[timeout]}")
+        ) as progress:
+            task = progress.add_task("Descargando...", total=len(urls), url="None", status="None", timeout=0.0)
+            for i, url in enumerate(urls):
+                html = get_html(url)
+                if html:
+                    soup.extend(BeautifulSoup(html, features="lxml").get_text().splitlines())
+                    if i < len(urls) - 1:
+                        wait_time = random.uniform(3, 8)
+                        progress.update(task, advance=1, url=url, status="Success", timeout=wait_time)
+                        time.sleep(wait_time)
+                    else:
+                        progress.update(task, advance=1, url=url, status="Success", timeout=0.0)
+                else:
+                    progress.update(task, advance=1, url=url, status="Failed", timeout=0.0)
+
+    return soup
+
+
 # Función para obtener datos con técnicas anti-baneo
 def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.DataFrame | None:
     try:
@@ -204,10 +256,6 @@ def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.Data
         data_dir = Path("data")
         data_dir.mkdir(exist_ok=True)
         
-        # Inicializar la sopa de texto
-        soup = []
-        
-        # Mezclar el orden de las URLs para que parezca más aleatorio
         wiki_urls = [
             "https://es.wikipedia.org/wiki/Argentina",
             "https://es.wikipedia.org/wiki/Python",
@@ -231,59 +279,14 @@ def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.Data
             "https://es.wikipedia.org/wiki/Christopher_Columbus"
         ]
         
-        # Añadir URLs personalizadas si se proporcionan
         if webs_urls:
             wiki_urls.extend(webs_urls)
         
-        # Mezclar las URLs para que el patrón de acceso sea aleatorio
         random.shuffle(wiki_urls)
+
+        soup = get_soup_from_url(wiki_urls)
         
-        # Procesar las URLs de Wikipedia con técnicas anti-baneo
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]Descargando datos..."),
-            BarColumn(),
-            TextColumn("URL: {task.fields[url]}"),
-            TimeElapsedColumn()
-        ) as progress:
-            task = progress.add_task("Descargando...", total=len(wiki_urls), url="Iniciando")
-            
-            for i, url in enumerate(wiki_urls):
-                # Actualizar la barra de progreso
-                progress.update(task, url=url)
-                
-                # Seleccionar un proxy aleatorio y aplicarlo a la sesión actual
-                proxy = get_random_proxy()
-                if proxy:
-                    # Aplicar proxy a la sesión actual
-                    current_session = session_pool[current_session_index]
-                    apply_proxy_to_session(current_session, proxy)
-                    console.print(f"[bold cyan]Usando proxy para {url}[/bold cyan]")
-                
-                # Obtener el HTML con todas las técnicas anti-baneo implementadas
-                html_content = get_html(url)
-                
-                # Procesar el contenido si se obtuvo correctamente
-                if html_content:
-                    # Extraer el texto
-                    text_lines = BeautifulSoup(html_content, features="lxml").get_text().splitlines()
-                    soup.extend(text_lines)
-                    
-                    # Guardar una copia del HTML para análisis posterior (opcional)
-                    # with open(data_dir / f"html_{i}_{timestamp}.html", "w", encoding="utf-8") as f:
-                    #     f.write(html_content)
-                
-                # Esperar un tiempo aleatorio entre peticiones para parecer más humano
-                # Este tiempo es adicional al que ya se espera en get_html
-                if i < len(wiki_urls) - 1:  # No esperar después de la última URL
-                    wait_time = random.uniform(3, 8)
-                    console.print(f"[bold blue]Esperando {wait_time:.2f} segundos antes de la siguiente URL...[/bold blue]")
-                    time.sleep(wait_time)
-                
-                # Actualizar el progreso
-                progress.update(task, advance=1)
-        
-        # Obtener datos de la documentación de Python
+        python_url_base = "https://docs.python.org/es/3/tutorial/"
         python_sub_html = [
             "",
             "appetite.html",
@@ -297,19 +300,9 @@ def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.Data
             "introduction.html#using-python-as-a-calculator"
         ]
         
-        # Mezclar también estas URLs
         random.shuffle(python_sub_html)
         
-        for sub_html in python_sub_html:
-            url = f"https://docs.python.org/es/3/tutorial/{sub_html}"
-            console.print(f"[bold green]Obteniendo {url}[/bold green]")
-            
-            # Esperar un tiempo aleatorio antes de cada petición
-            time.sleep(random.uniform(2, 5))
-            
-            html_python_docs_es = get_html(url)
-            if html_python_docs_es:
-                soup.extend(BeautifulSoup(html_python_docs_es, features="lxml").get_text().splitlines())
+        soup = get_soup_from_url([python_url_base], soup, python_sub_html)
 
         console.print("Longitud de la sopa de texto: ", len(soup))
 

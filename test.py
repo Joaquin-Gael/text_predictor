@@ -2,7 +2,7 @@ import torch as th
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from main import model, device, console, text_test
+from main import NanoModel, device, console
 
 # Optimizaciones (no tocan disco)
 th.backends.cuda.matmul.allow_tf32 = True
@@ -15,6 +15,8 @@ reserved_mib  = []
 seq_lens = []
 mem0_lens = []
 mem1_lens = []
+
+model: NanoModel = th.load("./models/model.pt")
 
 def log_mem(step, seq_len, mems):
     if th.cuda.is_available():
