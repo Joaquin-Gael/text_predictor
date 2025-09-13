@@ -1,6 +1,6 @@
 # Text Predictor 🚀
 
-¡Bienvenido/a al repositorio de **Nombre del Proyecto**! Este proyecto es una solución innovadora diseñada para Predecir el texto escrito al mismo estilo de GPT en sus comienzos. Aquí encontrarás todo lo necesario para entender, ejecutar y contribuir al desarrollo de esta aplicación.
+¡Bienvenido/a al repositorio de **NanoModel**! Este proyecto es una solución innovadora diseñada para Predecir el texto escrito al mismo estilo de GPT en sus comienzos. Aquí encontrarás todo lo necesario para entender, ejecutar y contribuir al desarrollo de esta aplicación.
 
 ## Descripción 📖
 
@@ -10,7 +10,7 @@ Este proyecto tiene como objetivo de convertirse en un modelo entrenado desde ce
 
 - **Torch**: Es un framework perfecto para hacer desde modelos pequeños a modelos enormes con GPT.
 - **Requests-BeautifulSoup**: Las librerias utilizadas para obtener la información gratuita de interner.
-- ~~**Rich-cli**: Una CLI echa para que se pueda interactuar y probar con el modelo en **terminal**.~~(En construction)
+- **Rich-cli**: Una CLI echa para que se pueda interactuar y probar con el modelo en **terminal**.(En construction)
 
 ## Tecnologías utilizadas 🛠️
 
