@@ -597,9 +597,7 @@ def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, m
     dataset = WikiDataset(csv_path)
     
     vocab_size = max(dataset.words)+1
-    emb_size = 600
     output_size = vocab_size
-    hidden_size = 600
     num_steps = 10
     num_heads = 10
     
