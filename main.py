@@ -377,8 +377,29 @@ class NanoModelHRM(nn.Module):
         self.output_layer.weight = self.embedding.weight
 
         self.mems_h_l = [None, None]
+    
+    def generate(self, input_words: th.Tensor, mems: list[th.Tensor | None, th.Tensor | None]=None, max_tokens: int = 10):
+        """Generar secuencia de tokens a partir de entrada."""
+        loggits, mems = self(input_words, mems)
+        out_ids = []
+        for _ in range(max_tokens-1):
+            console.print(f"Loggits shape: {loggits.shape}", style="bold green")
+            loggits = loggits[:, -1, :]
+            processor = LogitsProcessorList([
+                RepetitionPenaltyLogitsProcessor(penalty=1.3),
+                NoRepeatNGramLogitsProcessor(ngram_size=1),
+            ])
+            warper = TopPLogitsWarper(top_p=0.9)
+            loggits = processor(input_ids=input_words, scores=loggits)
+            loggits = warper(input_ids=input_words, scores=loggits)
+            probs = th.softmax(loggits, dim=-1)
+            next_token = th.multinomial(probs, num_samples=1)
+            out_ids.append(next_token.item())
+            input_words = th.cat([input_words, next_token], dim=1)
+            loggits, mems = self(input_words, mems)
+        return out_ids
 
-    def forward(self, input_words: th.Tensor, mems: list[th.Tensor | None, th.Tensor | None] | None =None, N: int=2, T: int=2):
+    def forward(self, input_words: th.Tensor, mems: list[th.Tensor | None, th.Tensor | None] | None =None, N: int=10, T: int=2):
         if mems is None:
             mems = self.mems_h_l
         if mems[0] is None and mems[1] is None:

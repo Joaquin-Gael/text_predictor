@@ -3,6 +3,8 @@ import torch as th
 from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
+import asyncio
+
 from main import train_model
 from utils import console, save_corpus, get_data
 
@@ -18,7 +20,7 @@ def cli():
 def collect(webs_urls, tokens):
     """Recolectar datos de las webs."""
     console.print(f"[bold green]Recolectando datos de las siguientes webs:[/bold green] {webs_urls}")
-    df = get_data(tokens=tokens, webs_urls=webs_urls)
+    df = asyncio.run(get_data(tokens=tokens, webs_urls=webs_urls))
     if df is None:
         console.print("[bold red]Error al recolectar datos[/bold red]")
         return
