@@ -1,0 +1,1 @@
+poetry run py train.py train --csp "corpus-20250907002736-tokens_100.csv" -hs 1000 -es 1000 -d 0.3 -lr 0.001 -b 128 -e 5

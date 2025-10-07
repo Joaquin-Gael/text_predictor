@@ -26,6 +26,12 @@ import math
 
 import polars as pl
 
+import pymupdf
+
+import io
+
+import os
+
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -120,7 +126,60 @@ languages = [
     "es;q=0.9,en-US;q=0.8,en;q=0.7"
 ]
 
-def get_html(url: str) -> str | None:
+async def get_pdf(url: str, download: bool = False) -> io.BytesIO:
+    global current_session_index
+
+    session = session_pool[current_session_index]
+    current_session_index = (current_session_index + 1) % len(session_pool)
+
+    headers = header_generator.generate()
+
+    headers['Referer'] = random.choice(referrers)
+    
+    headers['Accept-Language'] = random.choice(languages)
+    
+    headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    headers['Connection'] = 'keep-alive'
+    headers['DNT'] = '1'
+
+    try:
+        wait_time = random.uniform(1, 5)
+        time.sleep(wait_time)
+        
+        response = session.get(url, headers=headers, timeout=(10, 30), stream=download)
+        response.raise_for_status()
+        
+        if response.status_code == 429:
+            wait_time = int(response.headers.get('Retry-After', 60))
+            console.print(f"[bold yellow]Recibido 429, esperando {wait_time} segundos...[/bold yellow]")
+            time.sleep(wait_time)
+            return await get_pdf(url, download)
+        
+        if download:
+            pdf_bytes = io.BytesIO()
+            chunk_size = math.ceil(len(response.content) / 12)
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                pdf_bytes.write(chunk)
+
+            pdf_bytes.seek(0)
+
+            return pdf_bytes
+        
+        pdf = response.content
+        return io.BytesIO(pdf)
+    except rq.exceptions.RequestException as e:
+        console.print(f"[bold red]Error al obtener {url}: {str(e)}[/bold red]")
+        console.print_exception(show_locals=True)
+        
+        # Si es un error de conexión, esperar más tiempo antes de reintentar
+        if isinstance(e, (rq.exceptions.ConnectionError, rq.exceptions.Timeout)):
+            wait_time = random.uniform(10, 30)
+            console.print(f"[bold yellow]Error de conexión, esperando {wait_time:.2f} segundos...[/bold yellow]")
+            time.sleep(wait_time)
+        
+        return None
+
+async def get_html(url: str) -> str | None:
     """Obtiene el HTML de una URL con rotación de headers y sesiones para evitar baneos"""
     global current_session_index
     
@@ -129,21 +188,16 @@ def get_html(url: str) -> str | None:
     
     headers = header_generator.generate()
     
-    # Añadir referrers aleatorios para parecer más natural
     headers['Referer'] = random.choice(referrers)
     
-    # Añadir Accept-Language aleatorio (enfocado en español)
     headers['Accept-Language'] = random.choice(languages)
     
-    # Añadir otros headers para parecer más humano
     headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     headers['Connection'] = 'keep-alive'
-    headers['DNT'] = '1'  # Do Not Track
+    headers['DNT'] = '1'
     
     try:
-        # Añadir un retraso aleatorio entre peticiones (entre 1 y 5 segundos)
         wait_time = random.uniform(1, 5)
-        #console.print(f"[bold blue]Esperando {wait_time:.2f} segundos antes de solicitar {url}...[/bold blue]")
         time.sleep(wait_time)
         
         # Realizar la petición con los headers personalizados
@@ -155,7 +209,7 @@ def get_html(url: str) -> str | None:
             wait_time = int(response.headers.get('Retry-After', 60))
             console.print(f"[bold yellow]Recibido 429, esperando {wait_time} segundos...[/bold yellow]")
             time.sleep(wait_time)
-            return get_html(url)  # Reintentar después de esperar
+            return await get_html(url)  # Reintentar después de esperar
         
         html = response.text
         return html
@@ -196,7 +250,17 @@ def apply_proxy_to_session(session, proxy):
         }
     return session
 
-def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], extensions:list[str] | None = None) -> list[str]:
+async def read_pdf(pdf_bytes: io.BytesIO):
+    try:
+        doc = pymupdf.Document(stream=pdf_bytes, filetype="pdf")
+        raw_text = "".join([doc.load_page(i).get_text() for i in range(doc.page_count)])
+
+        return raw_text
+    except Exception as e:
+        console.print_exception(show_locals=True)
+        return None
+
+async def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], extensions:list[str] | None = None) -> list[str]:
     if urls and extensions:
         url = urls[0]
         with Progress(
@@ -210,7 +274,7 @@ def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], extensi
         ) as progress:
             task = progress.add_task("Descargando...", total=len(urls), url="None", status="None", timeout=0.0)
             for i, ext in enumerate(extensions):
-                html = get_html(url+ext)
+                html = await get_html(url+ext)
                 if html:
                     soup.extend(BeautifulSoup(html, features="lxml").get_text().splitlines())
                     if i < len(extensions) - 1:
@@ -233,7 +297,7 @@ def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], extensi
         ) as progress:
             task = progress.add_task("Descargando...", total=len(urls), url="None", status="None", timeout=0.0)
             for i, url in enumerate(urls):
-                html = get_html(url)
+                html = await get_html(url)
                 if html:
                     soup.extend(BeautifulSoup(html, features="lxml").get_text().splitlines())
                     if i < len(urls) - 1:
@@ -247,9 +311,21 @@ def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], extensi
 
     return soup
 
+async def get_from_download_or_pdf(urls: list[str, bool], soup: list[str] = []):
+    try:
+        for url, download in urls:
+            pdf_bytes = await get_pdf(url, download)
+            if pdf_bytes:
+                raw_text = await read_pdf(pdf_bytes)
+                if raw_text:
+                    soup.extend(raw_text.splitlines())
+    except:
+        console.print_exception(show_locals=True)
+        return None
+
 
 # Función para obtener datos con técnicas anti-baneo
-def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.DataFrame | None:
+async def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.DataFrame | None:
     try:
         # Crear un timestamp para guardar los datos descargados
         #timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -284,7 +360,7 @@ def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.Data
         
         random.shuffle(wiki_urls)
 
-        soup = get_soup_from_url(wiki_urls)
+        soup = await get_soup_from_url(wiki_urls)
         
         python_url_base = "https://docs.python.org/es/3/tutorial/"
         python_sub_html = [
@@ -302,7 +378,13 @@ def get_data(tokens: int = 10, webs_urls: Optional[List[str]] = None) -> pl.Data
         
         random.shuffle(python_sub_html)
         
-        soup = get_soup_from_url([python_url_base], soup, python_sub_html)
+        await get_soup_from_url([python_url_base], soup, python_sub_html)
+
+        await get_from_download_or_pdf([
+            ("https://www.argentina.gob.ar/sites/default/files/barba_azul_-_charles_perrault.pdf", True),
+            ("https://www.argentina.gob.ar/sites/default/files/blancanieves_-_hermanos_grimm.pdf", True),
+            ("https://www.argentina.gob.ar/sites/default/files/el_conde_lucanor_infante_juan_manuel.pdf", True)
+        ], soup)
 
         console.print("Longitud de la sopa de texto: ", len(soup))
 
@@ -624,7 +706,7 @@ def save_corpus(df: pl.DataFrame, tokens: int):
 
     # 🔍 Información general y estructura
     print("📋 Info del DataFrame:")
-    print(df, end="\n\n")
+    print(df.describe(), end="\n\n")
 
     # 🔍 Columnas y tipos de datos
     print("📋 Columnas y tipos:")
@@ -659,5 +741,17 @@ def save_corpus(df: pl.DataFrame, tokens: int):
         df.collect()
     else:
         print("No es LazyFrame")
-        
-    df.write_csv(f"./data/corpus-{datetime.now().strftime('%Y%m%d%H%M%S')}-tokens_{tokens}.csv")
+    
+    actual_date = datetime.now().strftime('%Y-%d-%m:%H-%M-%S')
+    
+    cpu_cores = math.ceil(os.cpu_count()/2)
+    print(f"Número de núcleos de CPU: {cpu_cores}")
+
+    pl.enable_string_cache()
+    os.environ["POLARS_MAX_THREADS"] = str(cpu_cores)
+    print(f"Número de hilos de Polars: {pl.thread_pool_size()}")
+    
+    df.write_csv(
+        f"./data/corpus-{actual_date}-tokens_{tokens}-rows_{df.height}.csv",
+        batch_size=math.ceil(df.height/cpu_cores)
+    )
