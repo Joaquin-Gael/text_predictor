@@ -278,7 +278,7 @@ async def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], e
                 if html:
                     soup.extend(BeautifulSoup(html, features="lxml").get_text().splitlines())
                     if i < len(extensions) - 1:
-                        wait_time = random.uniform(3, 8)
+                        wait_time = random.uniform(1, 4)
                         progress.update(task, advance=1, url=url+ext, status="Success", timeout=wait_time)
                         time.sleep(wait_time)
                     else:
@@ -301,7 +301,7 @@ async def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], e
                 if html:
                     soup.extend(BeautifulSoup(html, features="lxml").get_text().splitlines())
                     if i < len(urls) - 1:
-                        wait_time = random.uniform(3, 8)
+                        wait_time = random.uniform(1, 4)
                         progress.update(task, advance=1, url=url, status="Success", timeout=wait_time)
                         time.sleep(wait_time)
                     else:
@@ -313,12 +313,30 @@ async def get_soup_from_url(urls:list[str] | None = None, soup:list[str] = [], e
 
 async def get_from_download_or_pdf(urls: list[str, bool], soup: list[str] = []):
     try:
-        for url, download in urls:
-            pdf_bytes = await get_pdf(url, download)
-            if pdf_bytes:
-                raw_text = await read_pdf(pdf_bytes)
-                if raw_text:
-                    soup.extend(raw_text.splitlines())
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold green]Descargando datos..."),
+            BarColumn(),
+            TextColumn("URL: {task.fields[url]}"),
+            TimeElapsedColumn(),
+            TextColumn("Status: {task.fields[status]}"),
+            TextColumn("[red]TimeOut: {task.fields[timeout]}")
+        ) as progress:
+            task = progress.add_task("Descargando...", total=len(urls), url="None", status="None", timeout=0.0)
+            for i, (url, download) in enumerate(urls):
+                pdf_bytes = await get_pdf(url, download)
+                if pdf_bytes:
+                    raw_text = await read_pdf(pdf_bytes)
+                    if raw_text:
+                        soup.extend(raw_text.splitlines())
+                        if i < len(urls) - 1:
+                            wait_time = random.uniform(1, 4)
+                            progress.update(task, advance=1, url=url, status="Success", timeout=wait_time)
+                            time.sleep(wait_time)
+                        else:
+                            progress.update(task, advance=1, url=url, status="Success", timeout=0.0)
+                else:
+                    progress.update(task, advance=1, url=url, status="Failed", timeout=0.0)
     except:
         console.print_exception(show_locals=True)
         return None
@@ -742,7 +760,7 @@ def save_corpus(df: pl.DataFrame, tokens: int):
     else:
         print("No es LazyFrame")
     
-    actual_date = datetime.now().strftime('%Y-%d-%m:%H-%M-%S')
+    actual_date = datetime.now().strftime('%Y-%d-%m_%H-%M-%S')
     
     cpu_cores = math.ceil(os.cpu_count()/2)
     print(f"Número de núcleos de CPU: {cpu_cores}")
