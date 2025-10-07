@@ -766,7 +766,6 @@ def save_corpus(df: pl.DataFrame, tokens: int):
     print(f"Número de núcleos de CPU: {cpu_cores}")
 
     pl.enable_string_cache()
-    os.environ["POLARS_MAX_THREADS"] = str(cpu_cores)
     print(f"Número de hilos de Polars: {pl.thread_pool_size()}")
     
     df.write_csv(
