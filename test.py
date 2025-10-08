@@ -1,8 +1,10 @@
 import torch as th
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from pathlib import Path
 
-from main import NanoModel, device, console
+from main import NanoModelHRM, device, console
+import random
 
 # Optimizaciones (no tocan disco)
 th.backends.cuda.matmul.allow_tf32 = True
@@ -16,7 +18,17 @@ seq_lens = []
 mem0_lens = []
 mem1_lens = []
 
-model: NanoModel = th.load("./models/model.pt")
+model: NanoModelHRM = NanoModelHRM(
+    vocab_size=199995,
+    emb_size=1000,
+    hidden_size=1000,
+    output_size=199995,
+    num_steps=10,
+    head_num=10,
+    dropout=0.1,
+    mem_len=512
+).to(device)
+model.load_state_dict(th.load(f"{Path(__file__).parent.as_posix()}/models/model_5.pth"))
 
 def log_mem(step, seq_len, mems):
     if th.cuda.is_available():

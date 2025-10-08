@@ -12,6 +12,8 @@ import pandas as pd
 
 import polars as pl
 
+import os
+
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -600,9 +602,13 @@ def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, m
     output_size = vocab_size
     num_steps = 10
     num_heads = 10
+
+    cpu_cores = os.cpu_count()
+    console.print(f"CPU Cores: {cpu_cores}")
     
     if model_path:
-        model: NanoModelHRM = th.load(model_path)
+        model: NanoModelHRM = NanoModelHRM(vocab_size, emb_size, hidden_size, output_size, num_steps, num_heads, dropout)
+        model.load_state_dict(th.load(model_path))
     else:
         model: NanoModelHRM = NanoModelHRM(vocab_size, emb_size, hidden_size, output_size, num_steps, num_heads, dropout)
 
@@ -611,8 +617,8 @@ def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, m
     train_dataset: th.Tensor = train_dataset
     test_dataset: th.Tensor = test_dataset
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=cpu_cores//3)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, num_workers=cpu_cores//3)
 
     num_epochs = epochs
     console.print(f"Model: {model}\n Device: {get_device(train=True)}", style="bold green")
@@ -620,166 +626,175 @@ def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, m
     criterion = nn.CrossEntropyLoss()
     optimizer = th.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.0001)
         
-    print(f"Size Data Set: {dataset.shape()}")
-    print(f"Vocab Size: {vocab_size}")
-    print(f"Embedding Size: {emb_size}")
-    print(f"Output Size: {output_size}")
-    print(f"Input Size: {emb_size}")
-    print(f"Number of Epochs: {num_epochs}")
-    print(f"Word Size: {test_dataset[1][0].tolist()}")
-    print(f"Word Decode: {decode_text(test_dataset[1][0].tolist())}")
+    console.print(f"Size Data Set: {dataset.shape()}")
+    console.print(f"Vocab Size: {vocab_size}")
+    console.print(f"Embedding Size: {emb_size}")
+    console.print(f"Output Size: {output_size}")
+    console.print(f"Input Size: {emb_size}")
+    console.print(f"Number of Epochs: {num_epochs}")
+    console.print(f"Word Size: {test_dataset[1][0].tolist()}")
+    console.print(f"Word Decode: {decode_text(test_dataset[1][0].tolist())}")
 
     text_test(model)
 
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss_train = []
+    try:
+        for epoch in range(num_epochs):
+            model.train()
+            total_loss_train = []
 
-        with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TextColumn("{task.completed}/{task.total}"),
-                TimeElapsedColumn(),
-                TextColumn("[green]{task.fields[info]}"),
-                TextColumn("[red]Loss: {task.fields[loss]}"),
-                TextColumn("[red]Loss mean: {task.fields[loss_mean]}"),
-                TimeRemainingColumn()
-        ) as progress:
-            task = progress.add_task(
-                description=f"Epoch {epoch} - Train",
-                total=len(train_dataloader),
-                info="Iniciando",
-                loss="None",
-                loss_mean="None",
-            )
+            with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold blue]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TextColumn("{task.completed}/{task.total}"),
+                    TimeElapsedColumn(),
+                    TextColumn("[green]{task.fields[info]}"),
+                    TextColumn("[red]Loss: {task.fields[loss]}"),
+                    TextColumn("[red]Loss mean: {task.fields[loss_mean]}"),
+                    TimeRemainingColumn()
+            ) as progress:
+                task = progress.add_task(
+                    description=f"Epoch {epoch} - Train",
+                    total=len(train_dataloader),
+                    info="Iniciando",
+                    loss="None",
+                    loss_mean="None",
+                )
 
-            for idx, batch in enumerate(train_dataloader):
-                progress.update(task, info=f"Lote {idx}")
+                for idx, batch in enumerate(train_dataloader):
+                    progress.update(task, info=f"Lote {idx}")
 
-                input_words = batch[0]
-                target = batch[1]
-                input_words = input_words.to(get_device(train=True))
-                target = target.to(get_device(train=True))
-                mems = None
+                    input_words = batch[0]
+                    target = batch[1]
+                    input_words = input_words.to(get_device(train=True))
+                    target = target.to(get_device(train=True))
+                    mems = None
 
-                with th.amp.autocast("cuda"):
-                    try:
-                        if not mems is None:
-                            out, mems = model(input_words, mems)
-                        else:
-                            out, mems = model(input_words)
-                            
-                        if th.isnan(out).any().item():
-                            console.print("NaN en out!")
+                    with th.amp.autocast("cuda"):
+                        try:
+                            if not mems is None:
+                                out, mems = model(input_words, mems)
+                            else:
+                                out, mems = model(input_words)
+                                
+                            if th.isnan(out).any().item():
+                                console.print("NaN en out!")
 
-                    except Exception as e:
-                        console.print_exception(show_locals=True)
-                        console.print("Error:", e)
-                        console.print("Word:", input_words)
-                        continue
+                        except Exception as e:
+                            console.print_exception(show_locals=True)
+                            console.print("Error:", e)
+                            console.print("Word:", input_words)
+                            continue
+                        
+
+                        loss = criterion(out[:, -2, :], target.squeeze(-1).long())
+                    total_loss_train.append(loss.item())
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    progress.update(
+                        task,
+                        loss=f"{loss.item():.4f}",
+                        completed=float(idx),
+                        loss_mean=f"{sum(total_loss_train) / len(total_loss_train)}"
+                    )
+
+            model.eval()
+            total_loss_test = []
+
+            with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[bold red]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    TextColumn("{task.completed}/{task.total}"),
+                    TimeElapsedColumn(),
+                    TextColumn("[green]{task.fields[info]}"),
+                    TextColumn("[blue]Loss: {task.fields[loss]}"),
+                    TextColumn("[blue]Loss mean: {task.fields[loss_mean]}"),
+                    TimeRemainingColumn()
+            ) as progress:
+                task = progress.add_task(
+                    description=f"Epoch {epoch} - Test",
+                    total=len(test_dataloader),
+                    info="Iniciando",
+                    loss="None",
+                    loss_mean="None",
+                )
+
+                for idx, batch in enumerate(test_dataloader):
+                    progress.update(task, info=f"Lote {idx}")
+
+                    input_words = batch[0]
+                    target = batch[1]
+                    input_words = input_words.to(get_device(train=True))
+                    target = target.to(get_device(train=True))
+                    mems = None
                     
+                    with th.amp.autocast("cuda"):
+                        try:
+                            if not mems is None:
+                                out, mems = model(input_words, mems)
+                            else:
+                                out, mems = model(input_words)
+                        except Exception as e:
+                            console.print("Error:", e)
+                            console.print("Word:", input_words)
+                            console.print_exception(show_locals=True)
+                            continue
 
-                    loss = criterion(out[:, -2, :], target.squeeze(-1).long())
-                total_loss_train.append(loss.item())
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                progress.update(
-                    task,
-                    loss=f"{loss.item():.4f}",
-                    completed=float(idx),
-                    loss_mean=f"{sum(total_loss_train) / len(total_loss_train)}"
-                )
+                        loss = criterion(out[:, -2, :], target.squeeze(-1).long())
+                    total_loss_test.append(loss.item())
+                    progress.update(
+                        task,
+                        loss=f"{loss.item():.4f}",
+                        completed=float(idx),
+                        loss_mean=f"{sum(total_loss_test) / len(total_loss_test)}"
+                    )
 
-        model.eval()
-        total_loss_test = []
 
-        with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold red]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TextColumn("{task.completed}/{task.total}"),
-                TimeElapsedColumn(),
-                TextColumn("[green]{task.fields[info]}"),
-                TextColumn("[blue]Loss: {task.fields[loss]}"),
-                TextColumn("[blue]Loss mean: {task.fields[loss_mean]}"),
-                TimeRemainingColumn()
-        ) as progress:
-            task = progress.add_task(
-                description=f"Epoch {epoch} - Test",
-                total=len(test_dataloader),
-                info="Iniciando",
-                loss="None",
-                loss_mean="None",
+            console.print(f"Epoch {epoch}, Error: {sum(total_loss_test) / len(total_loss_test)}")
+
+
+            diff = len(total_loss_test) - len(total_loss_train)
+
+            if not len(total_loss_test) > len(total_loss_train):
+                diff = len(total_loss_train) - len(total_loss_test)
+
+            if diff > 0:
+                total_loss_test_extended = total_loss_test + [np.nan] * diff
+            else:
+                total_loss_test_extended = total_loss_test
+
+            df_loss = pd.DataFrame({
+                "Epoch":range(1, len(total_loss_train)+1),
+                "Loss Train": total_loss_train,
+                "Loss Test":total_loss_test_extended
+            })
+
+            fig = gen_graphic(
+                df_loss,
+                len(total_loss_train),
+                "Loss",
             )
 
-            for idx, batch in enumerate(test_dataloader):
-                progress.update(task, info=f"Lote {idx}")
+            model_name = f"model_{epoch}"
 
-                input_words = batch[0]
-                target = batch[1]
-                input_words = input_words.to(get_device(train=True))
-                target = target.to(get_device(train=True))
-                mems = None
-                
-                with th.amp.autocast("cuda"):
-                    try:
-                        if not mems is None:
-                            out, mems = model(input_words, mems)
-                        else:
-                            out, mems = model(input_words)
-                    except Exception as e:
-                        console.print("Error:", e)
-                        console.print("Word:", input_words)
-                        console.print_exception(show_locals=True)
-                        continue
+            if model_path:
+                model_name = f"model_{int(model_path.strip("_.pth"))+epoch}"
+            
+            th.save(model.state_dict(), f"./models/{model_name}.pth")
 
-                    loss = criterion(out[:, -2, :], target.squeeze(-1).long())
-                total_loss_test.append(loss.item())
-                progress.update(
-                    task,
-                    loss=f"{loss.item():.4f}",
-                    completed=float(idx),
-                    loss_mean=f"{sum(total_loss_test) / len(total_loss_test)}"
-                )
-
-
-        console.print(f"Epoch {epoch}, Error: {sum(total_loss_test) / len(total_loss_test)}")
-
-
-        diff = len(total_loss_test) - len(total_loss_train)
-
-        if not len(total_loss_test) > len(total_loss_train):
-            diff = len(total_loss_train) - len(total_loss_test)
-
-        if diff > 0:
-            total_loss_test_extended = total_loss_test + [np.nan] * diff
-        else:
-            total_loss_test_extended = total_loss_test
-
-        df_loss = pd.DataFrame({
-            "Epoch":range(1, len(total_loss_train)+1),
-            "Loss Train": total_loss_train,
-            "Loss Test":total_loss_test_extended
-        })
-
-        fig = gen_graphic(
-            df_loss,
-            len(total_loss_train),
-            "Loss",
-        )
-
-        model_name = f"model_{epochs}"
+            fig.show()
+    except KeyboardInterrupt:
+        model_name = f"model_{epoch}"
 
         if model_path:
-            model_name = f"model_{int(model_path.strip("_.pth"))+epochs}"
-        
+            model_name = f"model_{int(model_path.strip("_.pth"))+epoch}"
+    
         th.save(model.state_dict(), f"./models/{model_name}.pth")
-
-        fig.show()
+        console.print("Entrenamiento interrumpido por el usuario.", style="bold yellow")
         
 
     text_test(model)
