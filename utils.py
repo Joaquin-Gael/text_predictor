@@ -15,6 +15,8 @@ import unicodedata
 import time
 import random
 
+import sqlite3
+
 import numpy as np
 
 from tbparse import SummaryReader
@@ -85,6 +87,48 @@ def only_spanish_letters(text: str) -> str | None:
 
     return word
 
+
+def create_version_db() -> bool:
+    try:
+        conn = sqlite3.connect("./nano.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS version (
+        id INTEGER PRIMARY KEY, 
+        version TEXT,
+        epochs INTEGER,
+        loss REAL,
+        date_created DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception:
+        console.print_exception(show_locals=True)
+        return False
+
+def register_version(version: str, epochs: int, loss:float) -> bool:
+    try:
+        conn = sqlite3.connect("nano.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO version (version, epochs, loss) VALUES (?, ?, ?)", (version, epochs, loss))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception:
+        console.print_exception(show_locals=True)
+        return False
+
+def get_version_db() -> pl.DataFrame | None:
+    try:
+        conn = sqlite3.connect("./nano.db")
+        df_versions = pl.read_database("SELECT * FROM version", conn)
+        return df_versions
+    except Exception:
+        console.print_exception(show_locals=True)
+        return None
 
 # Configuración de sesión con reintentos
 def create_session():

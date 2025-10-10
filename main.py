@@ -1,7 +1,6 @@
-from turtle import forward
 import torch as th
-from torch import hsmm, nn
-import torch.nn.functional as F
+from torch import nn
+#import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 
 import numpy as np
@@ -33,7 +32,7 @@ from transformers import (
 
 import itertools
 
-from utils import decode_text, encode_text, only_spanish_letters, console, gen_graphic
+from utils import decode_text, encode_text, only_spanish_letters, console, gen_graphic, register_version, create_version_db, get_version_db
 
 device = th.device("cuda" if th.cuda.is_available() else "cpu")
 
@@ -136,70 +135,70 @@ class PositionalEncoding(nn.Module):
         x = input_words + self.pe[:input_words.size(0)]
         return self.dropout(x)
 
-class ComputeBlock(nn.Module):
-    def __init__(self, emb_size, hidden_size, dropout=0.3):
-        super(ComputeBlock, self).__init__()
-        self.layer_norm = nn.LayerNorm(hidden_size)
-        self.multy_head_attention = nn.MultiheadAttention(emb_size, num_heads=8, batch_first=True, dropout=0.3)
-        self.FFN = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.Dropout(p=dropout)
-        )
-        self.dropout = nn.Dropout(dropout)
+# class ComputeBlock(nn.Module):
+#     def __init__(self, emb_size, hidden_size, dropout=0.3):
+#         super(ComputeBlock, self).__init__()
+#         self.layer_norm = nn.LayerNorm(hidden_size)
+#         self.multy_head_attention = nn.MultiheadAttention(emb_size, num_heads=8, batch_first=True, dropout=0.3)
+#         self.FFN = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size),
+#             nn.GELU(),
+#             nn.Linear(hidden_size, hidden_size),
+#             nn.Dropout(p=dropout)
+#         )
+#         self.dropout = nn.Dropout(dropout)
+#
+#
+#     def forward(self, emb, attn_mask):
+#         norm = self.layer_norm(emb)
+#         attention_out, _ = self.multy_head_attention(norm, norm, norm, need_weights=False, attn_mask=attn_mask)
+#         residual = attention_out + emb
+#         norm_out = self.layer_norm(residual)
+#         ffn_out = self.FFN(norm_out)
+#         return ffn_out + residual
 
+# class TransformerModel(nn.Module):
+#     def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps):
+#         super(TransformerModel, self).__init__()
+#         self.embedding = nn.Embedding(vocab_size, emb_size)
+#         self.positional_encoding = PositionalEncoding(emb_size, emb_size)
+#         self.model_blocks = nn.ModuleList([ComputeBlock(emb_size, hidden_size) for _ in range(num_steps)])
+#         self.norm = nn.LayerNorm(hidden_size)
+#         #self.output_layer = nn.Linear(hidden_size, output_size, bias=False)
+#
+#         #self.output_layer.weight = self.embedding.weight
+#
+#     def forward(self, input_words):
+#         emb = self.embedding(input_words)
+#         enc = self.positional_encoding(emb)
+#
+#         # Build mask on the same device as the inputs to avoid device mismatches
+#         _mask = th.triu(
+#             th.ones(
+#                 (input_words.size(1), input_words.size(1)),
+#                 dtype=th.bool,
+#                 device=input_words.device
+#             )
+#         )
+#
+#         for block in self.model_blocks:
+#             out = block(enc, attn_mask=_mask)
+#
+#         #norm = self.norm(enc)
+#         #out = self.output_layer(norm)
+#         return out
 
-    def forward(self, emb, attn_mask):
-        norm = self.layer_norm(emb)
-        attention_out, _ = self.multy_head_attention(norm, norm, norm, need_weights=False, attn_mask=attn_mask)
-        residual = attention_out + emb
-        norm_out = self.layer_norm(residual)
-        ffn_out = self.FFN(norm_out)
-        return ffn_out + residual
+# class GPT2Model(nn.Module):
+#     def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps):
+#         super(GPT2Model, self).__init__()
+#         self.transformers = nn.ModuleList([TransformerModel(vocab_size, emb_size, hidden_size, output_size, num_steps) for _ in range(num_steps)])
+#         self.output_layer = nn.Linear(hidden_size, output_size, bias=False)
 
-class TransformerModel(nn.Module):
-    def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps):
-        super(TransformerModel, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, emb_size)
-        self.positional_encoding = PositionalEncoding(emb_size, emb_size)
-        self.model_blocks = nn.ModuleList([ComputeBlock(emb_size, hidden_size) for _ in range(num_steps)])
-        self.norm = nn.LayerNorm(hidden_size)
-        #self.output_layer = nn.Linear(hidden_size, output_size, bias=False)
-
-        #self.output_layer.weight = self.embedding.weight
-
-    def forward(self, input_words):
-        emb = self.embedding(input_words)
-        enc = self.positional_encoding(emb)
-
-        # Build mask on the same device as the inputs to avoid device mismatches
-        _mask = th.triu(
-            th.ones(
-                (input_words.size(1), input_words.size(1)),
-                dtype=th.bool,
-                device=input_words.device
-            )
-        )
-
-        for block in self.model_blocks:
-            out = block(enc, attn_mask=_mask)
-
-        #norm = self.norm(enc)
-        #out = self.output_layer(norm)
-        return out
-
-class GPT2Model(nn.Module):
-    def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps):
-        super(GPT2Model, self).__init__()
-        self.transformers = nn.ModuleList([TransformerModel(vocab_size, emb_size, hidden_size, output_size, num_steps) for _ in range(num_steps)])
-        self.output_layer = nn.Linear(hidden_size, output_size, bias=False)
-
-    def forward(self, input_words):
-        for transformer in self.transformers:
-            out = transformer(input_words)
-        out = self.output_layer(out)
-        return out
+#     def forward(self, input_words):
+#         for transformer in self.transformers:
+#             out = transformer(input_words)
+#         out = self.output_layer(out)
+#         return out
 
 class LineAttention(nn.Module):
     def __init__(self, emb_size, num_heads, dropout=0.1) -> None:
@@ -427,123 +426,123 @@ class NanoModelHRM(nn.Module):
 
         return out, mems
 
-class NanoModel(nn.Module):
-    def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, head_num, dropout, mem_len=512):
-        super(NanoModel, self).__init__()
+# class NanoModel(nn.Module):
+#     def __init__(self, vocab_size, emb_size, hidden_size, output_size, num_steps, head_num, dropout, mem_len=512):
+#         super(NanoModel, self).__init__()
         
-        self.mem_len = mem_len
-        self.hidden_size = hidden_size
-        self.emb_size = emb_size
+#         self.mem_len = mem_len
+#         self.hidden_size = hidden_size
+#         self.emb_size = emb_size
         
-        # Core components
-        self.embedding = nn.Embedding(vocab_size, emb_size)
-        self.pos_emb = PositionalEncoding(emb_size, dropout)
+#         # Core components
+#         self.embedding = nn.Embedding(vocab_size, emb_size)
+#         self.pos_emb = PositionalEncoding(emb_size, dropout)
         
-        # Transformer-XL blocks
-        self.transformer_blocks = nn.ModuleList([
-            TransformerXLBlock(
-                emb_size,
-                hidden_size,
-                head_num,
-                dropout=dropout
-            ) for _ in range(num_steps)
-        ])
+#         # Transformer-XL blocks
+#         self.transformer_blocks = nn.ModuleList([
+#             TransformerXLBlock(
+#                 emb_size,
+#                 hidden_size,
+#                 head_num,
+#                 dropout=dropout
+#             ) for _ in range(num_steps)
+#         ])
         
-        self.output_layer = nn.Linear(emb_size, output_size, bias=False)
-        self.output_layer.weight = self.embedding.weight
+#         self.output_layer = nn.Linear(emb_size, output_size, bias=False)
+#         self.output_layer.weight = self.embedding.weight
         
-        # Memory states
-        self.mems = []
+#         # Memory states
+#         self.mems = []
         
-    def _update_mems(self, hidden_states, mems):
-        # Update memory with current hidden states
-        # mems y hidden_states deben coincidir en batch y emb
-        with th.no_grad():
-            new_mems = []
-            for i in range(len(hidden_states)):
-                hs = hidden_states[i]
-                if i < len(mems):
-                    m = mems[i]
-                else:
-                    m = hs[:, 0:0, :]  # (B, 0, E)
+#     def _update_mems(self, hidden_states, mems):
+#         # Update memory with current hidden states
+#         # mems y hidden_states deben coincidir en batch y emb
+#         with th.no_grad():
+#             new_mems = []
+#             for i in range(len(hidden_states)):
+#                 hs = hidden_states[i]
+#                 if i < len(mems):
+#                     m = mems[i]
+#                 else:
+#                     m = hs[:, 0:0, :]  # (B, 0, E)
 
-                # Normalizar shape de memoria
-                if m.dim() != 3 or m.size(0) != hs.size(0) or m.size(2) != hs.size(2):
-                    m = hs[:, 0:0, :]
+#                 # Normalizar shape de memoria
+#                 if m.dim() != 3 or m.size(0) != hs.size(0) or m.size(2) != hs.size(2):
+#                     m = hs[:, 0:0, :]
 
-                cat = th.cat([m, hs], dim=1)
-                new_mems.append(cat[:, -self.mem_len:].detach())
-        return new_mems
+#                 cat = th.cat([m, hs], dim=1)
+#                 new_mems.append(cat[:, -self.mem_len:].detach())
+#         return new_mems
 
-    def forward(self, input_words, mems=None):
-        if mems is None:
-            # inicializar mems vacías con shape (B, 0, E)
-            B = input_words.size(0)
-            dev = input_words.device
-            dt = th.float
-            mems = [th.zeros((B, 0, self.emb_size), dtype=dt, device=dev)] * len(self.transformer_blocks)
+#     def forward(self, input_words, mems=None):
+#         if mems is None:
+#             # inicializar mems vacías con shape (B, 0, E)
+#             B = input_words.size(0)
+#             dev = input_words.device
+#             dt = th.float
+#             mems = [th.zeros((B, 0, self.emb_size), dtype=dt, device=dev)] * len(self.transformer_blocks)
             
-        # Word embeddings + positional encoding
-        word_emb = self.embedding(input_words)
-        pos_emb = self.pos_emb(word_emb)
+#         # Word embeddings + positional encoding
+#         word_emb = self.embedding(input_words)
+#         pos_emb = self.pos_emb(word_emb)
         
-        # Create causal attention mask
-        seq_len = input_words.size(1)
-        attn_mask = th.triu(
-            th.ones((seq_len, seq_len), dtype=th.bool, device=input_words.device),
-            diagonal=1
-        )
+#         # Create causal attention mask
+#         seq_len = input_words.size(1)
+#         attn_mask = th.triu(
+#             th.ones((seq_len, seq_len), dtype=th.bool, device=input_words.device),
+#             diagonal=1
+#         )
         
-        hidden_states = []
-        current_hidden = pos_emb
+#         hidden_states = []
+#         current_hidden = pos_emb
         
-        # Process through transformer blocks with memory
-        for transformer_block, m in zip(self.transformer_blocks, mems):
-            # Extend attention mask for memory tokens
-            if m.numel() > 0:
-                mem_len = m.size(1)
-                mem_mask = th.zeros((seq_len, mem_len), dtype=th.bool, device=input_words.device)
-                attn_mask_extended = th.cat([mem_mask, attn_mask], dim=1)
-            else:
-                attn_mask_extended = attn_mask
+#         # Process through transformer blocks with memory
+#         for transformer_block, m in zip(self.transformer_blocks, mems):
+#             # Extend attention mask for memory tokens
+#             if m.numel() > 0:
+#                 mem_len = m.size(1)
+#                 mem_mask = th.zeros((seq_len, mem_len), dtype=th.bool, device=input_words.device)
+#                 attn_mask_extended = th.cat([mem_mask, attn_mask], dim=1)
+#             else:
+#                 attn_mask_extended = attn_mask
                 
-            current_hidden = transformer_block(
-                current_hidden,
-                m,
-                attn_mask_extended
-            )
-            hidden_states.append(current_hidden)
+#             current_hidden = transformer_block(
+#                 current_hidden,
+#                 m,
+#                 attn_mask_extended
+#             )
+#             hidden_states.append(current_hidden)
             
-        # Update memory states
-        new_mems = self._update_mems(hidden_states, mems)
+#         # Update memory states
+#         new_mems = self._update_mems(hidden_states, mems)
         
-        # Output projection
-        output = self.output_layer(current_hidden)
+#         # Output projection
+#         output = self.output_layer(current_hidden)
         
-        return output, new_mems
+#         return output, new_mems
     
-    def generate(self, input_words, mems=None, max_tokens: int = 10):
-        """Generar secuencia de tokens a partir de entrada."""
-        loggits, mems = self(input_words, mems)
-        out_ids = []
-        for _ in range(max_tokens-1):
-            console.print(f"Loggits shape: {loggits.shape}", style="bold green")
-            loggits = loggits[:, -1, :]
-            processor = LogitsProcessorList([
-                RepetitionPenaltyLogitsProcessor(penalty=1.3),
-                NoRepeatNGramLogitsProcessor(ngram_size=1),
-            ])
-            warper = TopPLogitsWarper(top_p=0.9)
-            loggits = processor(input_ids=input_words, scores=loggits)
-            loggits = warper(input_ids=input_words, scores=loggits)
-            probs = th.softmax(loggits, dim=-1)
-            next_token = th.multinomial(probs, num_samples=1)
-            out_ids.append(next_token.item())
-            input_words = th.cat([input_words, next_token], dim=1)
-            loggits, mems = self(input_words, mems)
-        return out_ids
+#     def generate(self, input_words, mems=None, max_tokens: int = 10):
+#         """Generar secuencia de tokens a partir de entrada."""
+#         loggits, mems = self(input_words, mems)
+#         out_ids = []
+#         for _ in range(max_tokens-1):
+#             console.print(f"Loggits shape: {loggits.shape}", style="bold green")
+#             loggits = loggits[:, -1, :]
+#             processor = LogitsProcessorList([
+#                 RepetitionPenaltyLogitsProcessor(penalty=1.3),
+#                 NoRepeatNGramLogitsProcessor(ngram_size=1),
+#             ])
+#             warper = TopPLogitsWarper(top_p=0.9)
+#             loggits = processor(input_ids=input_words, scores=loggits)
+#             loggits = warper(input_ids=input_words, scores=loggits)
+#             probs = th.softmax(loggits, dim=-1)
+#             next_token = th.multinomial(probs, num_samples=1)
+#             out_ids.append(next_token.item())
+#             input_words = th.cat([input_words, next_token], dim=1)
+#             loggits, mems = self(input_words, mems)
+#         return out_ids
 
-def text_test(model: NanoModel):
+async def text_test(model: NanoModelHRM):
     with th.inference_mode():
         sequence_input = "Argentina es una tierra de"
         encode = encode_text(sequence_input)
@@ -589,7 +588,7 @@ def text_test(model: NanoModel):
         console.print("Final Sequence only spanish:", only_spanish_letters(sequence_output))
 
 
-def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, model_path:str, hidden_size:int, emb_size:int, dropout:float):
+async def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, model_path:str, hidden_size:int, emb_size:int, dropout:float):
     
     console.print(th.cuda.get_device_name(0) if th.cuda.is_available() else "No CUDA available", style="bold green")
     console.print(f"allocated: {th.cuda.memory_allocated() / 1024**3:.2f} GiB") if th.cuda.is_available() else None
@@ -635,7 +634,7 @@ def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, m
     console.print(f"Word Size: {test_dataset[1][0].tolist()}")
     console.print(f"Word Decode: {decode_text(test_dataset[1][0].tolist())}")
 
-    text_test(model)
+    await text_test(model)
 
     try:
         for epoch in range(num_epochs):
@@ -797,12 +796,27 @@ def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:str, m
         console.print("Entrenamiento interrumpido por el usuario.", style="bold yellow")
         
 
-    text_test(model)
+    await text_test(model)
+
+    if not os.path.exists("nano.db"):
+        create_version_db()
+
+    df_versions = get_version_db()
+
+    pre_loss = 0
+    
+    if df_versions is not None:
+        df_version = df_versions.select(
+            pl.col("loss").where(pl.col("loss") == df_versions["loss"].min())
+        )
+        pre_loss = df_version["loss"].item()
         
     if df_loss["Loss Train"].isnull().all():
         console.print("No hay datos de pérdida de entrenamiento para mostrar.", style="bold red")
         
-    elif df_loss["Loss Test"].mean() < 5:
+    elif df_loss["Loss Test"].mean() < pre_loss:
         console.print("El modelo ha convergido con éxito.", style="bold green")
-        th.save(model.state_dict(), "model.pth")
-        console.print("Modelo guardado como 'model.pth'.", style="bold green")
+        th.save(model.state_dict(), "nano.pth")
+        console.print("Modelo guardado como 'nano.pth'.", style="bold green")
+        register_version("nano", df_loss["Epoch"].max(), df_loss["Loss Test"].mean())
+        console.print("Versión registrada en la base de datos.", style="bold green")

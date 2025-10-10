@@ -1,18 +1,38 @@
 import click
-import torch as th
-from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.align import Align
+import pyfiglet
+import colorama
+
+import torch as th
+
+from pathlib import Path
 
 import asyncio
 
 from main import train_model
-from utils import console, save_corpus, get_data
+from utils import console, save_corpus, get_data, create_version_db
 
+colorama.init(autoreset=True)
 
 @click.group()
-def cli():
+@click.option('--nano', '-n', is_flag=True, help='Muestra la saludo de nano')
+def cli(nano):
     """Herramienta de entrenamiento para el modelo de predicción de texto."""
+    if nano:
+        console.print(
+            f"[bold blue]{pyfiglet.figlet_format('Nano CLI', font='isometric3', justify='center')}[/]"
+        )
     pass
+
+@cli.command()
+def init():
+    """Inicializar la base de datos."""
+    result = create_version_db()
+    if result:
+        console.print("[bold green]Base de datos inicializada[/bold green]")
+    else:
+        console.print("[bold red]Error al inicializar la base de datos[/bold red]")
 
 @cli.command()
 @click.option('--webs-urls', '-w', multiple=True, help='URLs de las webs a scrapear')
@@ -48,7 +68,7 @@ def train(epochs, batch_size, learning_rate, csv_path, model_path, hidden_size, 
     console.print(f"Embedding size: {emb_size}")
     console.print(f"Dropout: {dropout}")
     
-    train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_size, emb_size, dropout)
+    asyncio.run(train_model(epochs, batch_size, learning_rate, csv_path, model_path, hidden_size, emb_size, dropout))
 
 @cli.command()
 @click.option('--model-path', '-m', default='./model', help='Ruta del modelo entrenado')
