@@ -11,6 +11,8 @@ import pandas as pd
 
 import polars as pl
 
+import uuid
+
 import os
 
 from rich.progress import (
@@ -816,7 +818,10 @@ async def train_model(epochs:int, batch_size:int, learning_rate:float, csv_path:
         
     elif df_loss["Loss Test"].mean() < pre_loss:
         console.print("El modelo ha convergido con éxito.", style="bold green")
-        th.save(model.state_dict(), "nano.pth")
-        console.print("Modelo guardado como 'nano.pth'.", style="bold green")
-        register_version("nano", df_loss["Epoch"].max(), df_loss["Loss Test"].mean())
+        uuid = str(uuid.uuid4())
+        model = th.jit.script(model)
+        th.save(model.state_dict(), f"nano_{uuid}.pth")
+        th.jit.save(model, f"nano_{uuid}.pt")
+        console.print(f"Modelo guardado como 'nano_{uuid}.pth' y 'nano_{uuid}.pt'.", style="bold green")
+        register_version(f"nano_{uuid}", df_loss["Epoch"].max(), df_loss["Loss Test"].mean())
         console.print("Versión registrada en la base de datos.", style="bold green")
