@@ -4,3 +4,8 @@
 .web
 __pycache__/
 assets/external/
+
+# Archivos grandes
+models/*.pth
+models/*.pt
+data/*.csv
