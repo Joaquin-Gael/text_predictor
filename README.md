@@ -1,6 +1,6 @@
 # Text Predictor 🚀
 
-¡Bienvenido/a al repositorio de **NanoModel**! Este proyecto es una solución innovadora diseñada para Predecir el texto escrito al mismo estilo de GPT en sus comienzos. Aquí encontrarás todo lo necesario para entender, ejecutar y contribuir al desarrollo de esta aplicación.
+¡Bienvenido al repositorio de **NanoModel**! Este proyecto es una solución innovadora diseñada para Predecir el texto escrito al mismo estilo de GPT en sus comienzos. Aquí encontrarás todo lo necesario para entender, ejecutar y contribuir al desarrollo de esta aplicación.
 
 ## Descripción 📖
 
