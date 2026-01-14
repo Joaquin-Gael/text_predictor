@@ -236,12 +236,12 @@ class TransformerXLBlock(nn.Module):
         
         B, L, E = norm.shape
 
-        # Alinear memoria al batch/emb actual
+        #alinear 
         if mem.numel() > 0:
             if mem.dim() != 3 or mem.size(0) != B or mem.size(2) != E:
                 mem = norm[:, 0:0, :]  # (B, 0, E)
         else:
-            # asegurar tensor 3D vacío consistente
+            #3d
             mem = norm[:, 0:0, :]
 
         if th.isnan(norm).any().item():
